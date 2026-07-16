@@ -772,7 +772,7 @@ GNEAdditionalHandler::buildLaneCalibrator(const CommonXMLStructure::SumoBaseObje
                 // check if center after creation
                 if (sumoBaseObject->hasBoolAttribute(GNE_ATTR_CENTER_AFTER_CREATION) &&
                         sumoBaseObject->getBoolAttribute(GNE_ATTR_CENTER_AFTER_CREATION)) {
-                    myNet->getViewNet()->centerTo(calibrator->getPositionInView(), false);
+                    myNet->getViewNet()->centerToPos(calibrator->getPositionInView(), false);
                 }
             } else {
                 myNet->getAttributeCarriers()->insertAdditional(calibrator);
@@ -826,7 +826,7 @@ GNEAdditionalHandler::buildEdgeCalibrator(const CommonXMLStructure::SumoBaseObje
                 // check if center after creation
                 if (sumoBaseObject->hasBoolAttribute(GNE_ATTR_CENTER_AFTER_CREATION) &&
                         sumoBaseObject->getBoolAttribute(GNE_ATTR_CENTER_AFTER_CREATION)) {
-                    myNet->getViewNet()->centerTo(calibrator->getPositionInView(), false);
+                    myNet->getViewNet()->centerToPos(calibrator->getPositionInView(), false);
                 }
             } else {
                 myNet->getAttributeCarriers()->insertAdditional(calibrator);
@@ -1167,7 +1167,7 @@ GNEAdditionalHandler::buildRouteProbe(const CommonXMLStructure::SumoBaseObject* 
                 // check if center after creation
                 if (sumoBaseObject->hasBoolAttribute(GNE_ATTR_CENTER_AFTER_CREATION) &&
                         sumoBaseObject->getBoolAttribute(GNE_ATTR_CENTER_AFTER_CREATION)) {
-                    myNet->getViewNet()->centerTo(routeProbe->getPositionInView(), false);
+                    myNet->getViewNet()->centerToPos(routeProbe->getPositionInView(), false);
                 }
             } else {
                 myNet->getAttributeCarriers()->insertAdditional(routeProbe);
@@ -1294,7 +1294,7 @@ GNEAdditionalHandler::buildVaporizer(const CommonXMLStructure::SumoBaseObject* s
                 // check if center after creation
                 if (sumoBaseObject->hasBoolAttribute(GNE_ATTR_CENTER_AFTER_CREATION) &&
                         sumoBaseObject->getBoolAttribute(GNE_ATTR_CENTER_AFTER_CREATION)) {
-                    myNet->getViewNet()->centerTo(vaporizer->getPositionInView(), false);
+                    myNet->getViewNet()->centerToPos(vaporizer->getPositionInView(), false);
                 }
             } else {
                 myNet->getAttributeCarriers()->insertAdditional(vaporizer);
@@ -1584,8 +1584,9 @@ GNEAdditionalHandler::buildOverheadWireClamp(const CommonXMLStructure::SumoBaseO
 
 bool
 GNEAdditionalHandler::buildPolygon(const CommonXMLStructure::SumoBaseObject* sumoBaseObject, const std::string& id, const std::string& type,
-                                   const RGBColor& color, double layer, double angle, const std::string& imgFile, const PositionVector& shape,
-                                   bool geo, bool fill, double lineWidth, const std::string& name, const Parameterised::Map& parameters) {
+                                   const RGBColor& color, const double layer, const double angle, const std::string& imgFile, const PositionVector& shape,
+                                   const bool geo, const bool fill, const double lineWidth, const std::string& name, const double height,
+                                   const Parameterised::Map& parameters) {
     // check conditions
     if (type == "jupedsim.walkable_area") {
         return buildJpsWalkableArea(sumoBaseObject, id, shape, geo, name, parameters);
@@ -1602,7 +1603,7 @@ GNEAdditionalHandler::buildPolygon(const CommonXMLStructure::SumoBaseObject* sum
             return false;
         } else {
             // create poly
-            GNEPoly* poly = new GNEPoly(id, myNet, myFileBucket, type, shape, geo, fill, lineWidth, color, layer, angle, imgFile, name, parameters);
+            GNEPoly* poly = new GNEPoly(id, myNet, myFileBucket, type, shape, geo, fill, lineWidth, color, layer, angle, imgFile, name, height, parameters);
             // add it depending of allow undoRed
             if (myAllowUndoRedo) {
                 myNet->getUndoList()->begin(poly, TL("add polygon '") + id + "'");

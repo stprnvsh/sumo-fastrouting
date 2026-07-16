@@ -316,6 +316,7 @@ GNELane::updateGeometry() {
         // Update outgoings connections of this lane
         const auto outGoingConnections = getGNEOutcomingConnections();
         for (const auto& connection : outGoingConnections) {
+            connection->markConnectionGeometryDeprecated();
             connection->updateGeometry();
         }
     }
@@ -1080,7 +1081,7 @@ GNELane::drawShapeEdited(const GUIVisualizationSettings& s) const {
         GUIGeometry::drawGeometryPoints(myDrawingConstants->getDetail(), myLaneGeometry.getShape(),
                                         s.colorSettings.editShapeColor.changedBrightness(-32),
                                         s.neteditSizeSettings.laneGeometryPointRadius, 1,
-                                        myNet->getViewNet()->getNetworkViewOptions().editingElevation());
+                                        true, myNet->getViewNet()->getNetworkViewOptions().editingElevation());
         // Pop shape edited matrix
         GLHelper::popMatrix();
     }

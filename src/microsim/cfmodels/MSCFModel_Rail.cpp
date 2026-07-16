@@ -96,7 +96,7 @@ double
 MSCFModel_Rail::RailVehicleVariables::getIntegratedRadius(const MSVehicle* veh, double curveIntegration) {
     const double odo = veh->getOdometer();
     // add new data point
-    if (odometerAngles.empty() || odometerAngles.back().first != odo) {
+    if ((odometerAngles.empty() || odometerAngles.back().first != odo) && veh->hasDeparted()) {
         odometerAngles.push_back(std::make_pair(odo, veh->getAngle()));
         // clean up old data points beyond integration distance
         while (odometerAngles.size() > 2) {
@@ -111,9 +111,6 @@ MSCFModel_Rail::RailVehicleVariables::getIntegratedRadius(const MSVehicle* veh, 
     if (odometerAngles.size() > 1) {
         const double dist = odometerAngles.back().first - odometerAngles.front().first;
         const double angleDiff = GeomHelper::angleDiff(odometerAngles.back().second, odometerAngles.front().second);
-        if (dist < curveIntegration) {
-            return veh->getCurveRadius();
-        }
         return angleDiff == 0
             ? std::numeric_limits<double>::max()
             : dist / fabs(angleDiff);

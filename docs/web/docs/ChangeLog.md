@@ -13,12 +13,24 @@ title: ChangeLog
   - Fixed crash when using idle-algorithm 'taxistand' #18159
 
 - netedit
+  - Fixed invalid connection shapes after computing the network for the first time #16885 (regression in 1.22.0)
+  - The menu function for saving .sumocfg with save-as is working again #18150 (regression in 1.26.0)
+  - The button for saving the .sumocfg is now functional again after loading a network #18151 (regression in 1.26.0)
   - Junction context menu operation 'clearing connections' no longer generates an invalid network if the junction had tls-controlled pedestrian crossings #18145 (regression in 1.27.0)
+  - setting "random" as color value for vehicles is now working #18014
 
 - netconvert
+  - Fixed missing connections in networks with dedicated bus lanes #18181 (regression in 1.23.0)
   - Fixed crash when rail signal connection link index is patched #18142
   - OSM: no longer importing superfluous tls where tram runs on road #18146
   - Fixed missed joins when using **--edges.join-tram-dist** on a network with joined junctions #18154
+  - When option **--sidewalks.guess** is set, high-speed edges without sidewalks are no longer modelled as shared space #18170
+  - Setting options **--plain-output-prefix** and **--output.format csv** now writes files with *.csv* extension #18171
+  - Fixed crash when using **--plain-output-prefix** and **--output.format parquet** #18179
+  - Fixed several issues that caused invalid content to be written when using options **--plain-output-prefix** and **--output.format csv** #18180, #18175, #18197, #18189
+
+- tools
+  - drtOnline.py: fixed failure to dispatch vehicles that have an underscore ('_') in their id. #18167
 
 ### Enhancements
 
@@ -27,10 +39,28 @@ title: ChangeLog
   - In carFollowModel 'Rail', curvature is now computed by integrating over a configurable distance (default 100m) to smooth piecewise linear geometry. #18138
   - vehicle types can be initialized with values from another vType by using attribute `refId` #18144
   - Elements `<edgeData>` and `<laneData>` now support attribute `speedThresholdRelative` as an optional condition for recording `waitingTime` #18161
+  - vTypeDistribution can now reference an existing vType using attribute `refId` without creating a new type (similar to routeDistributions). This fixes a problem with vTypeDistributions created by netedit being unusable since version 1.25.0 #18178
 
+- netedit
+  - Added visualization toggle switch for showing start and end symbols (S, E) for polygons #17911
+  - edgeData / laneData attribute `aggregate` now permits the special value `taz` #17342
+  - data mode: Dragging the mouse will ctrl is held, now moves the view #17139
+
+- duarouter
+  - vTypeDistribution can now reference an existing vType using attribute `refId` without creating a new type (similar to routeDistributions) #18178
  
 - meso
   - Now supports traffic light type 'actuated' #8735
+
+- tools
+  - instantOutToEdgeData.py: added option **--poi-output** to visualize extra values and aid in debugging #18166
+  - edgeDataFromFlow.py: added option **--turn-output** to write edgeRelations for detectors that have a unique sucessor edge #17955
+  - edgeDataFromFlow.py: added option **--skip-incomplete** to exclude data from incomplete cross-sections #18182
+  - flow2POI.poi: added [new tool](Tools/Detector.md#flow2poipy) for visualizing detector flow #18193
+
+### Miscellaneous
+
+- traci.lane.getAllowed() now returns the complete list of allowed vehicle classes if all classes are allowed. This avoids ambiguity between having "all" or "nothing" allowed #18201
 
 ## Version 1.27.1 (25.06.2026) ([downloads](https://sumo.dlr.de/docs/Downloads.php))
 

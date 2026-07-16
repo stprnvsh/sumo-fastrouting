@@ -11,6 +11,7 @@ fmi/vehicle_moveToXY
 fmi/vehicle_getParameterWithKey
 fmi/vehicle_getIDCount
 fmi/model_validation
+netconvert/plain_roundtrip/parquet
 appdata=dfrouter
 appdata=duarouter
 appdata=jtrrouter
@@ -77,6 +78,7 @@ basic/dynamics/insertion/high_flow2
 basic/dynamics/insertion/high_flow2_emergencyDecel
 basic/dynamics/insertion/best_distance
 basic/dynamics/short_edges
+output/examples/cross3ltl_fcd_parquet
 output/fcd-output/persons/parquet
 output/fcd-output/persons/separate_parquet
 extended/rerouter/closingLaneReroute/closingLane

@@ -4,6 +4,13 @@ basic
 # create turn-count data for detectors that have a unique successor edge
 turnData
 
+# create turn-count data for detectors that have a unique successor edge
+# (custom aggregation)
+turnData_i120
+
+# do not write edge counting data unless all (vehicular) lanes of an edge are covered with detectors
+skip_incomplete
+
 # generate cadyts output
 cadyts
 
@@ -15,3 +22,6 @@ interval
 timeColumn
 time_humanReadable
 timeFormat
+
+# warn about suspicious input
+duplicate_lane

@@ -759,6 +759,8 @@ MSFrame::fillOptions() {
     oc.addOptionSubTopic("Mesoscopic");
     oc.doRegister("mesosim", new Option_Bool(false));
     oc.addDescription("mesosim", "Mesoscopic", TL("Enables mesoscopic simulation"));
+    oc.doRegister("meso-lift", new Option_Bool(false));
+    oc.addDescription("meso-lift", "Mesoscopic", TL("Enables the LIFT model"));
     oc.doRegister("meso-edgelength", new Option_Float(98.0f));
     oc.addDescription("meso-edgelength", "Mesoscopic", TL("Length of an edge segment in mesoscopic simulation"));
     oc.doRegister("meso-tauff", new Option_String("1.13", "TIME"));
@@ -958,11 +960,14 @@ MSFrame::checkOptions() {
         }
         oc.setDefault("meso-junction-control", "true");
     }
+    if (oc.getBool("meso-lift") && oc.isDefault("mesosim")) {
+        oc.setDefault("mesosim", "true");
+    }
     if (oc.getBool("mesosim")) {
         if (oc.isDefault("pedestrian.model")) {
             oc.setDefault("pedestrian.model", "nonInteracting");
         }
-        if (oc.isDefault("no-internal-links")) {
+        if (oc.isDefault("no-internal-links") && !oc.getBool("meso-lift")) {
             oc.setDefault("no-internal-links", "true");
         }
     }

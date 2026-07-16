@@ -49,15 +49,18 @@ const double GNETAZ::myHintSizeSquared = 0.64;
 #endif
 GNETAZ::GNETAZ(GNENet* net) :
     GNEAdditional(net, SUMO_TAG_TAZ),
-    TesselatedPolygon("", "", RGBColor::BLACK, {}, false, false, 1, Shape::DEFAULT_LAYER, Shape::DEFAULT_ANGLE, Shape::DEFAULT_IMG_FILE, ""),
+    TesselatedPolygon("", "", RGBColor::BLACK, {}, false, false, DEFAULT_LINEWIDTH, DEFAULT_LAYER,
+DEFAULT_ANGLE, DEFAULT_IMG_FILE, "", DEFAULT_HEIGHT, DEFAULT_PARAMETERS),
 myMoveElementShape(new GNEMoveElementShape(this)) {
 }
 
 
-GNETAZ::GNETAZ(const std::string& id, GNENet* net, FileBucket* fileBucket, const PositionVector& shape, const Position& center, const bool fill,
-               const RGBColor& color, const std::string& name, const Parameterised::Map& parameters) :
+GNETAZ::GNETAZ(const std::string& id, GNENet* net, FileBucket* fileBucket, const PositionVector& shape,
+               const Position& center, const bool fill, const RGBColor& color, const std::string& name,
+               const Parameterised::Map& parameters) :
     GNEAdditional(id, net, SUMO_TAG_TAZ, fileBucket, name),
-    TesselatedPolygon(id, "", color, shape, false, fill, 1, Shape::DEFAULT_LAYER, Shape::DEFAULT_ANGLE, Shape::DEFAULT_IMG_FILE, "", parameters),
+    TesselatedPolygon(id, "", color, shape, false, fill, DEFAULT_LINEWIDTH, DEFAULT_LAYER,
+                      DEFAULT_ANGLE, DEFAULT_IMG_FILE, "", DEFAULT_HEIGHT, parameters),
     myMoveElementShape(new GNEMoveElementShape(this, myShape, center, true)) {
     // update centering boundary without updating grid
     updateCenteringBoundary(false);
@@ -319,6 +322,7 @@ GNETAZ::drawGL(const GUIVisualizationSettings& s) const {
                     const double geometryPointSize = s.neteditSizeSettings.polygonGeometryPointRadius * (moveMode ? 1 : 0.5);
                     // draw geometry points
                     GUIGeometry::drawGeometryPoints(d, myAdditionalGeometry.getShape(), darkerColor, geometryPointSize, TAZExaggeration,
+                                                    myNet->getViewNet()->getNetworkViewOptions().showPolygonSymbols(),
                                                     myNet->getViewNet()->getNetworkViewOptions().editingElevation());
                     // draw dotted contours for geometry points if we're in move mode
                     if (moveMode) {
