@@ -119,6 +119,10 @@ public:
         return mySkipEmpty;
     }
 
+    static inline int getThreads() {
+        return myThreads;
+    }
+
     /// @brief initialize edge filter and attribute mask (once)
     static void initOnce();
 
@@ -165,6 +169,9 @@ private:
 
     /// @brief whether time steps without vehicles will generate output
     static bool mySkipEmpty;
+
+    /// @brief the number of threads for computing the output values
+    static int myThreads;
 
 private:
     /// @brief Invalidated copy constructor.

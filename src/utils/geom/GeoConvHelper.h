@@ -118,6 +118,15 @@ public:
     /// @brief Converts the given cartesian (shifted) position to its geo (lat/long) representation
     void cartesian2geo(Position& cartesian) const;
 
+    /** @brief Returns a heap allocated copy with its own projection objects for use in a separate thread
+     *
+     * Neither PJ objects nor PJ_CONTEXTs may be shared between threads, so the copy
+     * creates its projection in a context of its own.
+     *
+     * @return the copy or nullptr if the projection cannot be duplicated faithfully
+     */
+    GeoConvHelper* makeThreadSafeCopy() const;
+
     /**@brief Converts the given coordinate into a cartesian and optionally update myConvBoundary
      * @note: initializes UTM / DHDN projection on first use (select zone)
      */
@@ -182,10 +191,12 @@ private:
     std::string myProjString;
 
 #ifdef PROJ_API_FILE
-    void initProj(const std::string& proj);
-
 #ifdef PROJ_VERSION_MAJOR
+    void initProj(const std::string& proj, PJ_CONTEXT* ctx = PJ_DEFAULT_CTX);
+
     bool checkError(projPJ projection) const;
+#else
+    void initProj(const std::string& proj);
 #endif
 
     /// @brief The proj.4-projection to use

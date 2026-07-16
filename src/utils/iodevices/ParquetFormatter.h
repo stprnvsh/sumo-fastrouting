@@ -57,7 +57,7 @@ public:
      */
     bool writeXMLHeader(std::ostream& into, const std::string& rootElement,
                         const std::map<SumoXMLAttr, std::string>& attrs, bool /* writeMetadata */,
-                        bool /* includeConfig */);
+                        bool /* includeConfig */) override;
 
     void openTag(std::ostream& into, const std::string& xmlElement) override;
     void openTag(std::ostream& into, const SumoXMLTag& xmlElement) override;

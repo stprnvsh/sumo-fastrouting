@@ -16,12 +16,17 @@
 /// @author  Jakob Erdmann
 /// @author  Mario Krumnow
 /// @author  Michael Behrisch
+/// @author  Pranav Sateesh
 /// @date    2012-04-26
 ///
 // Realises dumping Floating Car Data (FCD) Data
 /****************************************************************************/
 #include <config.h>
 
+#include <condition_variable>
+#include <mutex>
+#include <thread>
+#include <utils/common/MsgHandler.h>
 #include <utils/iodevices/OutputDevice.h>
 #include <utils/options/OptionsCont.h>
 #include <utils/geom/GeoConvHelper.h>
@@ -43,6 +48,222 @@
 #include <mesosim/MEVehicle.h>
 #include "MSEmissionExport.h"
 #include "MSFCDExport.h"
+
+
+// ===========================================================================
+// FCDWorkerPool definition
+// ===========================================================================
+namespace {
+/** @brief A persistent pool of worker threads which computes the expensive
+ * per-vehicle output values (position, angle, slope, geo projection) in
+ * parallel while the rows are still written in their original order.
+ *
+ * The values are bitwise identical to the single threaded computation because
+ * exactly the same code runs on each vehicle; only the loop is partitioned.
+ */
+class FCDWorkerPool {
+public:
+    ~FCDWorkerPool() {
+        shutdown();
+    }
+
+    /// @brief fill in the values of all rows using numThreads threads (including the calling thread)
+    void computeAll(std::vector<MSFCDExport::VehicleState>& rows, const int numThreads,
+                    const bool useGeo, const bool useUTM, const SumoXMLAttrMask& mask) {
+        startWorkers(numThreads - 1, useGeo);
+        {
+            std::lock_guard<std::mutex> lock(myMutex);
+            myRows = &rows;
+            myDoGeo = useGeo && myClonesValid;
+            myDoUTM = useUTM;
+            myUTMOffset = GeoConvHelper::getFinal().getOffset();
+            myMask = mask;
+            myUnfinished = (int)myThreads.size();
+            myGeneration++;
+        }
+        myCondition.notify_all();
+        // the calling thread computes the last slice itself (using the shared
+        // GeoConvHelper instance which no worker touches)
+        std::string error;
+        try {
+            computeSlice((int)myThreads.size());
+        } catch (const std::exception& e) {
+            error = e.what();
+        }
+        {
+            std::unique_lock<std::mutex> lock(myMutex);
+            myDone.wait(lock, [this] {
+                return myUnfinished == 0;
+            });
+            if (error == "" && myError != "") {
+                error = myError;
+            }
+            myError = "";
+        }
+        myRows = nullptr;
+        if (error != "") {
+            throw ProcessError(error);
+        }
+        if (useGeo && !myClonesValid) {
+            // the projection could not be duplicated for the workers; convert here instead
+            for (MSFCDExport::VehicleState& row : rows) {
+                GeoConvHelper::getFinal().cartesian2geo(row.pos);
+            }
+        }
+    }
+
+    /// @brief join all workers and release the projection copies
+    void shutdown() {
+        if (!myThreads.empty()) {
+            {
+                std::lock_guard<std::mutex> lock(myMutex);
+                myShutdown = true;
+            }
+            myCondition.notify_all();
+            for (std::thread& t : myThreads) {
+                t.join();
+            }
+            myThreads.clear();
+            myShutdown = false;
+        }
+        for (GeoConvHelper* const clone : myGeoClones) {
+            delete clone;
+        }
+        myGeoClones.clear();
+        myHaveClones = false;
+    }
+
+private:
+    /// @brief bring up the workers (and the projection copies) if not running yet
+    void startWorkers(const int numWorkers, const bool useGeo) {
+        if ((int)myThreads.size() == numWorkers && (!useGeo || myHaveClones)) {
+            return;
+        }
+        shutdown();
+        myClonesValid = true;
+        if (useGeo) {
+            myHaveClones = true;
+            for (int i = 0; i < numWorkers; i++) {
+                GeoConvHelper* const clone = GeoConvHelper::getFinal().makeThreadSafeCopy();
+                if (clone == nullptr) {
+                    myClonesValid = false;
+                }
+                myGeoClones.push_back(clone);
+            }
+            if (!myClonesValid) {
+                WRITE_WARNING(TL("Could not duplicate the projection for parallel FCD output; the geo conversion runs in a single thread."));
+            }
+        } else {
+            myGeoClones.assign(numWorkers, nullptr);
+        }
+        for (int i = 0; i < numWorkers; i++) {
+            myThreads.emplace_back(&FCDWorkerPool::workerMain, this, i);
+        }
+    }
+
+    /// @brief compute the values of one contiguous slice of the rows
+    void computeSlice(const int part) {
+        std::vector<MSFCDExport::VehicleState>& rows = *myRows;
+        const long long int numRows = (long long int)rows.size();
+        const long long int numParts = (long long int)myThreads.size() + 1;
+        const int begin = (int)(numRows * part / numParts);
+        const int end = (int)(numRows * (part + 1) / numParts);
+        const GeoConvHelper* const geo = part < (int)myThreads.size() ? myGeoClones[part] : &GeoConvHelper::getFinal();
+        for (int i = begin; i < end; i++) {
+            MSFCDExport::VehicleState& row = rows[i];
+            row.pos = row.veh->getPosition();
+            if (myDoGeo) {
+                geo->cartesian2geo(row.pos);
+            } else if (myDoUTM) {
+                row.pos.sub(myUTMOffset);
+            }
+            if (myMask.test(SUMO_ATTR_ANGLE)) {
+                row.angle = GeomHelper::naviDegree(row.veh->getAngle());
+            }
+            if (myMask.test(SUMO_ATTR_SLOPE)) {
+                row.slope = row.veh->getSlope();
+            }
+            if (myMask.test(SUMO_ATTR_POSITION)) {
+                row.posOnLane = row.veh->getPositionOnLane();
+            }
+        }
+    }
+
+    /// @brief the worker loop: wait for the next job generation, compute the assigned slice, count down
+    void workerMain(const int part) {
+        long long int lastGeneration = 0;
+        while (true) {
+            {
+                std::unique_lock<std::mutex> lock(myMutex);
+                myCondition.wait(lock, [this, lastGeneration] {
+                    return myShutdown || myGeneration != lastGeneration;
+                });
+                if (myShutdown) {
+                    return;
+                }
+                lastGeneration = myGeneration;
+            }
+            try {
+                computeSlice(part);
+            } catch (const std::exception& e) {
+                std::lock_guard<std::mutex> lock(myMutex);
+                if (myError == "") {
+                    myError = e.what();
+                }
+            }
+            {
+                std::lock_guard<std::mutex> lock(myMutex);
+                if (--myUnfinished == 0) {
+                    myDone.notify_all();
+                }
+            }
+        }
+    }
+
+    /// @brief the worker threads
+    std::vector<std::thread> myThreads;
+
+    /// @brief one projection copy per worker (entries may be nullptr)
+    std::vector<GeoConvHelper*> myGeoClones;
+
+    /// @brief whether projection copies were requested for the current workers
+    bool myHaveClones = false;
+
+    /// @brief whether every worker got a usable projection copy
+    bool myClonesValid = true;
+
+    /// @brief protects the job state below
+    std::mutex myMutex;
+
+    /// @brief signals a new job generation to the workers
+    std::condition_variable myCondition;
+
+    /// @brief signals the completion of all slices to the caller
+    std::condition_variable myDone;
+
+    /// @brief the current job generation
+    long long int myGeneration = 0;
+
+    /// @brief the number of slices still being computed
+    int myUnfinished = 0;
+
+    /// @brief whether the workers shall terminate
+    bool myShutdown = false;
+
+    /// @brief the first error thrown by a worker (if any)
+    std::string myError;
+
+    /// @{ the description of the current job
+    std::vector<MSFCDExport::VehicleState>* myRows = nullptr;
+    bool myDoGeo = false;
+    bool myDoUTM = false;
+    Position myUTMOffset;
+    SumoXMLAttrMask myMask;
+    /// @}
+};
+
+FCDWorkerPool gFCDPool;
+}
 
 
 // ===========================================================================
@@ -80,6 +301,25 @@ MSFCDExport::write(OutputDevice& of, const SUMOTime timestep, const SumoXMLTag t
         }
     }
 
+    const bool writeVehicles = tag == SUMO_TAG_NOTHING || tag == SUMO_TAG_VEHICLE;
+    const bool parallel = writeVehicles && MSDevice_FCD::getThreads() > 1;
+    std::vector<VehicleState> precomputed;
+    std::vector<VehicleState>::size_type nextRow = 0;
+    if (parallel) {
+        for (MSVehicleControl::constVehIt it = vc.loadedVehBegin(); it != vc.loadedVehEnd(); ++it) {
+            const SUMOVehicle* const veh = it->second;
+            if (isVisible(veh) && hasOwnOutput(veh, filter, shapeFilter, radius > 0 && inRadius.count(veh) > 0)) {
+                if (MSGlobals::gUseMesoSim && MSGlobals::gMesoInterpolatePos) {
+                    // fill the per edge position cache while still single threaded
+                    veh->getEdge()->getMesoPositions();
+                }
+                precomputed.push_back(VehicleState());
+                precomputed.back().veh = veh;
+            }
+        }
+        gFCDPool.computeAll(precomputed, MSDevice_FCD::getThreads(), useGeo, useUTM, mask);
+    }
+
     bool wroteTimestep = false;
     auto openTimestep = [&]() {
         if (!wroteTimestep) {
@@ -93,156 +333,22 @@ MSFCDExport::write(OutputDevice& of, const SUMOTime timestep, const SumoXMLTag t
     for (MSVehicleControl::constVehIt it = vc.loadedVehBegin(); it != vc.loadedVehEnd(); ++it) {
         const SUMOVehicle* const veh = it->second;
         if (isVisible(veh)) {
-            const bool hasOutput = (tag == SUMO_TAG_NOTHING || tag == SUMO_TAG_VEHICLE) && hasOwnOutput(veh, filter, shapeFilter, (radius > 0 && inRadius.count(veh) > 0));
+            const VehicleState* pre = nullptr;
+            bool hasOutput;
+            if (parallel) {
+                // the precomputed rows are a subsequence of this loop so a pointer comparison
+                // avoids evaluating the filters a second time
+                hasOutput = nextRow < precomputed.size() && precomputed[nextRow].veh == veh;
+                if (hasOutput) {
+                    pre = &precomputed[nextRow];
+                    nextRow++;
+                }
+            } else {
+                hasOutput = writeVehicles && hasOwnOutput(veh, filter, shapeFilter, radius > 0 && inRadius.count(veh) > 0);
+            }
             if (hasOutput) {
                 openTimestep();
-                const MSVehicle* const microVeh = MSGlobals::gUseMesoSim ? nullptr : static_cast<const MSVehicle*>(veh);
-                Position pos = veh->getPosition();
-                if (useGeo) {
-                    of.setPrecision(gPrecisionGeo);
-                    GeoConvHelper::getFinal().cartesian2geo(pos);
-                } else if (useUTM) {
-                    pos.sub(GeoConvHelper::getFinal().getOffset());
-                }
-                of.openTag(SUMO_TAG_VEHICLE);
-                of.writeAttr(SUMO_ATTR_ID, veh->getID());
-                of.writeOptionalAttr(SUMO_ATTR_X, pos.x(), mask);
-                of.writeOptionalAttr(SUMO_ATTR_Y, pos.y(), mask);
-                of.setPrecision(gPrecision);
-                of.writeOptionalAttr(SUMO_ATTR_Z, pos.z(), mask);
-                of.writeFuncAttr(SUMO_ATTR_ANGLE, [ = ]() {
-                    return GeomHelper::naviDegree(veh->getAngle());
-                }, mask);
-                of.writeFuncAttr(SUMO_ATTR_TYPE, [ = ]() {
-                    return veh->getVehicleType().getID();
-                }, mask);
-                of.writeFuncAttr(SUMO_ATTR_SPEED, [ = ]() {
-                    return veh->getSpeed();
-                }, mask);
-                of.writeFuncAttr(SUMO_ATTR_SPEEDREL, [ = ]() {
-                    const double speedLimit = veh->getEdge()->getSpeedLimit();
-                    return speedLimit > 0 ? veh->getSpeed() / speedLimit : 0.;
-                }, mask);
-                of.writeFuncAttr(SUMO_ATTR_POSITION, [ = ]() {
-                    return veh->getPositionOnLane();
-                }, mask);
-                of.writeFuncAttr(SUMO_ATTR_LANE, [ = ]() {
-                    return MSGlobals::gUseMesoSim ? "" : microVeh->getLane()->getID();
-                }, mask, MSGlobals::gUseMesoSim);
-                of.writeFuncAttr(SUMO_ATTR_EDGE, [ = ]() {
-                    return veh->getCurrentEdge()->getID();
-                }, mask, !MSGlobals::gUseMesoSim);
-                of.writeFuncAttr(SUMO_ATTR_SLOPE, [ = ]() {
-                    return veh->getSlope();
-                }, mask);
-                if (!MSGlobals::gUseMesoSim) {
-                    of.writeFuncAttr(SUMO_ATTR_SIGNALS, [ = ]() {
-                        return microVeh->getSignals();
-                    }, mask);
-                    of.writeFuncAttr(SUMO_ATTR_ACCELERATION, [ = ]() {
-                        return microVeh->getAcceleration();
-                    }, mask);
-                    of.writeFuncAttr(SUMO_ATTR_ACCELERATION_LAT, [ = ]() {
-                        return microVeh->getLaneChangeModel().getAccelerationLat();
-                    }, mask);
-                    of.writeFuncAttr(SUMO_ATTR_SPEED_VEC, [ = ]() {
-                        return GeomHelper::vectorize(microVeh->getSpeed(), microVeh->getAngle());
-                    }, mask);
-                    of.writeFuncAttr(SUMO_ATTR_ACCEL_VEC, [ = ]() {
-                        return GeomHelper::vectorize(microVeh->getAcceleration(), microVeh->getAngle());
-                    }, mask);
-                }
-                of.writeFuncAttr(SUMO_ATTR_DISTANCE, [ = ]() {
-                    double lanePos = veh->getPositionOnLane();
-                    if (!MSGlobals::gUseMesoSim && microVeh->getLane()->isInternal()) {
-                        lanePos = microVeh->getRoute().getDistanceBetween(0., lanePos, microVeh->getEdge()->getLanes()[0], microVeh->getLane(),
-                                  microVeh->getRoutePosition());
-                    }
-                    return veh->getEdge()->getDistanceAt(lanePos);
-                }, mask);
-                of.writeFuncAttr(SUMO_ATTR_ODOMETER, [ = ]() {
-                    return veh->getOdometer();
-                }, mask);
-                of.writeFuncAttr(SUMO_ATTR_POSITION_LAT, [ = ]() {
-                    return veh->getLateralPositionOnLane();
-                }, mask);
-                if (!MSGlobals::gUseMesoSim) {
-                    of.writeFuncAttr(SUMO_ATTR_SPEED_LAT, [ = ]() {
-                        return microVeh->getLaneChangeModel().getSpeedLat();
-                    }, mask);
-                }
-                if (maxLeaderDistance >= 0 && !MSGlobals::gUseMesoSim) {
-                    const std::pair<const MSVehicle* const, double> leader = microVeh->getLeader(maxLeaderDistance);
-                    if (leader.first != nullptr) {
-                        of.writeFuncAttr(SUMO_ATTR_LEADER_ID, [ = ]() {
-                            return leader.first->getID();
-                        }, mask);
-                        of.writeFuncAttr(SUMO_ATTR_LEADER_SPEED, [ = ]() {
-                            return leader.first->getSpeed();
-                        }, mask);
-                        of.writeFuncAttr(SUMO_ATTR_LEADER_GAP, [ = ]() {
-                            return leader.second + microVeh->getVehicleType().getMinGap();
-                        }, mask);
-                    } else {
-                        of.writeFuncAttr(SUMO_ATTR_LEADER_ID, [ = ]() {
-                            return "";
-                        }, mask);
-                        of.writeFuncAttr(SUMO_ATTR_LEADER_SPEED, [ = ]() {
-                            return -1;
-                        }, mask);
-                        of.writeFuncAttr(SUMO_ATTR_LEADER_GAP, [ = ]() {
-                            return -1;
-                        }, mask);
-                    }
-                }
-                for (const std::string& key : params) {
-                    std::string error;
-                    const std::string value = static_cast<const MSBaseVehicle*>(veh)->getPrefixedParameter(key, error);
-                    if (value != "") {
-                        of.writeAttr(StringUtils::escapeXML(key), StringUtils::escapeXML(value));
-                    }
-                }
-                of.writeFuncAttr(SUMO_ATTR_ARRIVALDELAY, [ = ]() {
-                    const double arrivalDelay = static_cast<const MSBaseVehicle*>(veh)->getStopArrivalDelay();
-                    if (arrivalDelay == INVALID_DOUBLE) {
-                        // no upcoming stop also means that there is no delay
-                        return 0.;
-                    }
-                    return arrivalDelay;
-                }, mask);
-                of.writeFuncAttr(SUMO_ATTR_DELAY, [ = ]() {
-                    const double delay = static_cast<const MSBaseVehicle*>(veh)->getStopDelay();
-                    if (delay < 0) {
-                        // no upcoming stop also means that there is no delay
-                        return 0.;
-                    }
-                    return delay;
-                }, mask);
-                if (MSGlobals::gUseMesoSim) {
-                    const MEVehicle* mesoVeh = static_cast<const MEVehicle*>(veh);
-                    of.writeFuncAttr(SUMO_ATTR_SEGMENT, [ = ]() {
-                        return mesoVeh->getSegmentIndex();
-                    }, mask);
-                    of.writeFuncAttr(SUMO_ATTR_QUEUE, [ = ]() {
-                        return mesoVeh->getQueIndex();
-                    }, mask);
-                    of.writeFuncAttr(SUMO_ATTR_ENTRYTIME, [ = ]() {
-                        return mesoVeh->getLastEntryTimeSeconds();
-                    }, mask);
-                    of.writeFuncAttr(SUMO_ATTR_EVENTTIME, [ = ]() {
-                        return mesoVeh->getEventTimeSeconds();
-                    }, mask);
-                    of.writeFuncAttr(SUMO_ATTR_BLOCKTIME, [ = ]() {
-                        return mesoVeh->getBlockTime() == SUMOTime_MAX ? -1.0 : mesoVeh->getBlockTimeSeconds();
-                    }, mask);
-                }
-                of.writeFuncAttr(SUMO_ATTR_TAG, [ = ]() {
-                    return toString(SUMO_TAG_VEHICLE);
-                }, mask);
-                of.writeOptionalAttr(SUMO_ATTR_PERSON_NUMBER, veh->getPersonNumber(), mask);
-                of.writeOptionalAttr(SUMO_ATTR_CONTAINER_NUMBER, veh->getContainerNumber(), mask);
-                MSEmissionExport::writeEmissions(of, static_cast<const MSBaseVehicle*>(veh), false, mask);
-                of.closeTag();
+                writeVehicle(of, veh, pre, mask, useGeo, useUTM, maxLeaderDistance, params);
             }
             // write persons and containers in the vehicle
             if (tag == SUMO_TAG_NOTHING || tag == SUMO_TAG_PERSON) {
@@ -295,6 +401,173 @@ MSFCDExport::write(OutputDevice& of, const SUMOTime timestep, const SumoXMLTag t
     if (wroteTimestep) {
         of.closeTag();
     }
+}
+
+
+void
+MSFCDExport::cleanup() {
+    gFCDPool.shutdown();
+}
+
+
+void
+MSFCDExport::writeVehicle(OutputDevice& of, const SUMOVehicle* const veh, const VehicleState* const pre,
+                          const SumoXMLAttrMask& mask, const bool useGeo, const bool useUTM,
+                          const double maxLeaderDistance, const std::vector<std::string>& params) {
+    const MSVehicle* const microVeh = MSGlobals::gUseMesoSim ? nullptr : static_cast<const MSVehicle*>(veh);
+    Position pos;
+    if (pre != nullptr) {
+        pos = pre->pos;
+    } else {
+        pos = veh->getPosition();
+        if (useGeo) {
+            GeoConvHelper::getFinal().cartesian2geo(pos);
+        } else if (useUTM) {
+            pos.sub(GeoConvHelper::getFinal().getOffset());
+        }
+    }
+    if (useGeo) {
+        of.setPrecision(gPrecisionGeo);
+    }
+    of.openTag(SUMO_TAG_VEHICLE);
+    of.writeAttr(SUMO_ATTR_ID, veh->getID());
+    of.writeOptionalAttr(SUMO_ATTR_X, pos.x(), mask);
+    of.writeOptionalAttr(SUMO_ATTR_Y, pos.y(), mask);
+    of.setPrecision(gPrecision);
+    of.writeOptionalAttr(SUMO_ATTR_Z, pos.z(), mask);
+    of.writeFuncAttr(SUMO_ATTR_ANGLE, [ = ]() {
+        return pre != nullptr ? pre->angle : GeomHelper::naviDegree(veh->getAngle());
+    }, mask);
+    of.writeFuncAttr(SUMO_ATTR_TYPE, [ = ]() {
+        return veh->getVehicleType().getID();
+    }, mask);
+    of.writeFuncAttr(SUMO_ATTR_SPEED, [ = ]() {
+        return veh->getSpeed();
+    }, mask);
+    of.writeFuncAttr(SUMO_ATTR_SPEEDREL, [ = ]() {
+        const double speedLimit = veh->getEdge()->getSpeedLimit();
+        return speedLimit > 0 ? veh->getSpeed() / speedLimit : 0.;
+    }, mask);
+    of.writeFuncAttr(SUMO_ATTR_POSITION, [ = ]() {
+        return pre != nullptr ? pre->posOnLane : veh->getPositionOnLane();
+    }, mask);
+    of.writeFuncAttr(SUMO_ATTR_LANE, [ = ]() {
+        return MSGlobals::gUseMesoSim ? "" : microVeh->getLane()->getID();
+    }, mask, MSGlobals::gUseMesoSim);
+    of.writeFuncAttr(SUMO_ATTR_EDGE, [ = ]() {
+        return veh->getCurrentEdge()->getID();
+    }, mask, !MSGlobals::gUseMesoSim);
+    of.writeFuncAttr(SUMO_ATTR_SLOPE, [ = ]() {
+        return pre != nullptr ? pre->slope : veh->getSlope();
+    }, mask);
+    if (!MSGlobals::gUseMesoSim) {
+        of.writeFuncAttr(SUMO_ATTR_SIGNALS, [ = ]() {
+            return microVeh->getSignals();
+        }, mask);
+        of.writeFuncAttr(SUMO_ATTR_ACCELERATION, [ = ]() {
+            return microVeh->getAcceleration();
+        }, mask);
+        of.writeFuncAttr(SUMO_ATTR_ACCELERATION_LAT, [ = ]() {
+            return microVeh->getLaneChangeModel().getAccelerationLat();
+        }, mask);
+        of.writeFuncAttr(SUMO_ATTR_SPEED_VEC, [ = ]() {
+            return GeomHelper::vectorize(microVeh->getSpeed(), microVeh->getAngle());
+        }, mask);
+        of.writeFuncAttr(SUMO_ATTR_ACCEL_VEC, [ = ]() {
+            return GeomHelper::vectorize(microVeh->getAcceleration(), microVeh->getAngle());
+        }, mask);
+    }
+    of.writeFuncAttr(SUMO_ATTR_DISTANCE, [ = ]() {
+        double lanePos = veh->getPositionOnLane();
+        if (!MSGlobals::gUseMesoSim && microVeh->getLane()->isInternal()) {
+            lanePos = microVeh->getRoute().getDistanceBetween(0., lanePos, microVeh->getEdge()->getLanes()[0], microVeh->getLane(),
+                      microVeh->getRoutePosition());
+        }
+        return veh->getEdge()->getDistanceAt(lanePos);
+    }, mask);
+    of.writeFuncAttr(SUMO_ATTR_ODOMETER, [ = ]() {
+        return veh->getOdometer();
+    }, mask);
+    of.writeFuncAttr(SUMO_ATTR_POSITION_LAT, [ = ]() {
+        return veh->getLateralPositionOnLane();
+    }, mask);
+    if (!MSGlobals::gUseMesoSim) {
+        of.writeFuncAttr(SUMO_ATTR_SPEED_LAT, [ = ]() {
+            return microVeh->getLaneChangeModel().getSpeedLat();
+        }, mask);
+    }
+    if (maxLeaderDistance >= 0 && !MSGlobals::gUseMesoSim) {
+        const std::pair<const MSVehicle* const, double> leader = microVeh->getLeader(maxLeaderDistance);
+        if (leader.first != nullptr) {
+            of.writeFuncAttr(SUMO_ATTR_LEADER_ID, [ = ]() {
+                return leader.first->getID();
+            }, mask);
+            of.writeFuncAttr(SUMO_ATTR_LEADER_SPEED, [ = ]() {
+                return leader.first->getSpeed();
+            }, mask);
+            of.writeFuncAttr(SUMO_ATTR_LEADER_GAP, [ = ]() {
+                return leader.second + microVeh->getVehicleType().getMinGap();
+            }, mask);
+        } else {
+            of.writeFuncAttr(SUMO_ATTR_LEADER_ID, [ = ]() {
+                return "";
+            }, mask);
+            of.writeFuncAttr(SUMO_ATTR_LEADER_SPEED, [ = ]() {
+                return -1;
+            }, mask);
+            of.writeFuncAttr(SUMO_ATTR_LEADER_GAP, [ = ]() {
+                return -1;
+            }, mask);
+        }
+    }
+    for (const std::string& key : params) {
+        std::string error;
+        const std::string value = static_cast<const MSBaseVehicle*>(veh)->getPrefixedParameter(key, error);
+        if (value != "") {
+            of.writeAttr(StringUtils::escapeXML(key), StringUtils::escapeXML(value));
+        }
+    }
+    of.writeFuncAttr(SUMO_ATTR_ARRIVALDELAY, [ = ]() {
+        const double arrivalDelay = static_cast<const MSBaseVehicle*>(veh)->getStopArrivalDelay();
+        if (arrivalDelay == INVALID_DOUBLE) {
+            // no upcoming stop also means that there is no delay
+            return 0.;
+        }
+        return arrivalDelay;
+    }, mask);
+    of.writeFuncAttr(SUMO_ATTR_DELAY, [ = ]() {
+        const double delay = static_cast<const MSBaseVehicle*>(veh)->getStopDelay();
+        if (delay < 0) {
+            // no upcoming stop also means that there is no delay
+            return 0.;
+        }
+        return delay;
+    }, mask);
+    if (MSGlobals::gUseMesoSim) {
+        const MEVehicle* mesoVeh = static_cast<const MEVehicle*>(veh);
+        of.writeFuncAttr(SUMO_ATTR_SEGMENT, [ = ]() {
+            return mesoVeh->getSegmentIndex();
+        }, mask);
+        of.writeFuncAttr(SUMO_ATTR_QUEUE, [ = ]() {
+            return mesoVeh->getQueIndex();
+        }, mask);
+        of.writeFuncAttr(SUMO_ATTR_ENTRYTIME, [ = ]() {
+            return mesoVeh->getLastEntryTimeSeconds();
+        }, mask);
+        of.writeFuncAttr(SUMO_ATTR_EVENTTIME, [ = ]() {
+            return mesoVeh->getEventTimeSeconds();
+        }, mask);
+        of.writeFuncAttr(SUMO_ATTR_BLOCKTIME, [ = ]() {
+            return mesoVeh->getBlockTime() == SUMOTime_MAX ? -1.0 : mesoVeh->getBlockTimeSeconds();
+        }, mask);
+    }
+    of.writeFuncAttr(SUMO_ATTR_TAG, [ = ]() {
+        return toString(SUMO_TAG_VEHICLE);
+    }, mask);
+    of.writeOptionalAttr(SUMO_ATTR_PERSON_NUMBER, veh->getPersonNumber(), mask);
+    of.writeOptionalAttr(SUMO_ATTR_CONTAINER_NUMBER, veh->getContainerNumber(), mask);
+    MSEmissionExport::writeEmissions(of, static_cast<const MSBaseVehicle*>(veh), false, mask);
+    of.closeTag();
 }
 
 

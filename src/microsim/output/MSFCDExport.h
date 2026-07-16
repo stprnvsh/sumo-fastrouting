@@ -20,7 +20,10 @@
 #pragma once
 #include <config.h>
 
+#include <string>
+#include <vector>
 #include <utils/common/SUMOTime.h>
+#include <utils/geom/Position.h>
 
 
 // ===========================================================================
@@ -57,7 +60,24 @@ public:
      */
     static void write(OutputDevice& of, const SUMOTime timestep, const SumoXMLTag tag = SUMO_TAG_NOTHING);
 
+    /// @brief releases the worker threads (called when the network is unloaded)
+    static void cleanup();
+
+    /// @brief the values of a vehicle which are precomputed in parallel before writing (see fcd-output.threads)
+    struct VehicleState {
+        const SUMOVehicle* veh = nullptr;
+        Position pos;
+        double angle = 0.;
+        double slope = 0.;
+        double posOnLane = 0.;
+    };
+
 private:
+    /// @brief write a single vehicle, either using the precomputed values or computing them on the fly
+    static void writeVehicle(OutputDevice& of, const SUMOVehicle* const veh, const VehicleState* const precomputed,
+                             const SumoXMLAttrMask& mask, const bool useGeo, const bool useUTM,
+                             const double maxLeaderDistance, const std::vector<std::string>& params);
+
     /// @brief write transportable
     static void writeTransportable(OutputDevice& of, const MSEdge* const e, const MSTransportable* const p, const SUMOVehicle* const v,
                                    const SumoXMLTag tag, const bool useGeo, const SumoXMLAttrMask mask);
