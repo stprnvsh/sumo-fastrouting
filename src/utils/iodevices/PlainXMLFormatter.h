@@ -127,6 +127,34 @@ public:
         return !myXMLStack.empty();
     }
 
+    /** @brief writes the closing ">" of a pending tag opener (if any)
+     *
+     * Called before raw content produced elsewhere (e.g. staged rows) is
+     * appended to the stream.
+     */
+    void closeOpener(std::ostream& into) {
+        if (myHavePendingOpener) {
+            into << ">\n";
+            myHavePendingOpener = false;
+        }
+    }
+
+    /// @name parallel row staging
+    /// @{
+    bool supportsParallelRows() const {
+        return true;
+    }
+
+    OutputFormatter* createRowStager() const {
+        return new PlainXMLFormatter(0);
+    }
+
+    /// @brief let the stager indent its rows like children of the currently open element
+    void primeRowStager(OutputFormatter& stager) const {
+        static_cast<PlainXMLFormatter&>(stager).myDefaultIndentation = (int)myXMLStack.size();
+    }
+    /// @}
+
 private:
     /// @brief The stack of begun xml elements
     std::vector<std::string> myXMLStack;

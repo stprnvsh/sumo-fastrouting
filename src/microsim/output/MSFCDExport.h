@@ -29,6 +29,7 @@
 // ===========================================================================
 // class declarations
 // ===========================================================================
+class GeoConvHelper;
 class OutputDevice;
 class MSEdgeControl;
 class MSEdge;
@@ -72,12 +73,18 @@ public:
         double posOnLane = 0.;
     };
 
-private:
-    /// @brief write a single vehicle, either using the precomputed values or computing them on the fly
+    /** @brief write a single vehicle, either using the precomputed values or computing them on the fly
+     *
+     * Also runs on worker threads (against staging devices) when the output
+     * format supports parallel row serialization, see fcd-output.threads.
+     * @param[in] geo the geo projection to use (a thread private copy on worker threads)
+     */
     static void writeVehicle(OutputDevice& of, const SUMOVehicle* const veh, const VehicleState* const precomputed,
                              const SumoXMLAttrMask& mask, const bool useGeo, const bool useUTM,
-                             const double maxLeaderDistance, const std::vector<std::string>& params);
+                             const double maxLeaderDistance, const std::vector<std::string>& params,
+                             const GeoConvHelper* const geo);
 
+private:
     /// @brief write transportable
     static void writeTransportable(OutputDevice& of, const MSEdge* const e, const MSTransportable* const p, const SUMOVehicle* const v,
                                    const SumoXMLTag tag, const bool useGeo, const SumoXMLAttrMask mask);

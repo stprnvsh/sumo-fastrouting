@@ -165,6 +165,37 @@ public:
         UNUSED_PARAMETER(depth);
     }
 
+    /// @name parallel row staging
+    /// Worker threads may serialize independent rows into staging twins of this
+    /// formatter; the owning thread then appends the staged rows in their
+    /// original order which keeps the output bitwise identical to a serial write.
+    /// @{
+
+    /** @brief Returns whether rows may currently be serialized on staging twins
+     *
+     * The default implementation returns false (no parallel support).
+     */
+    virtual bool supportsParallelRows() const {
+        return false;
+    }
+
+    /** @brief Returns a staging twin of this formatter for use in a worker thread
+     * @return the stager or nullptr if unsupported
+     */
+    virtual OutputFormatter* createRowStager() const {
+        return nullptr;
+    }
+
+    /** @brief Prepares a staging twin for the rows of the currently open element
+     *
+     * Transfers the state a row serialization depends on (e.g. the enclosing
+     * elements and their attributes) and resets the stager's row storage.
+     */
+    virtual void primeRowStager(OutputFormatter& stager) const {
+        UNUSED_PARAMETER(stager);
+    }
+    /// @}
+
 private:
     /// @brief the type of formatter being used (XML, CSV, Parquet, etc.)
     const OutputFormatterType myType;

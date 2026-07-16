@@ -11,6 +11,8 @@ set(utils_iodevices_STAT_SRCS
    OutputDevice_File.h
    OutputDevice_Network.cpp
    OutputDevice_Network.h
+   OutputDevice_RowStager.cpp
+   OutputDevice_RowStager.h
    OutputDevice_String.cpp
    OutputDevice_String.h
    OutputFormatter.h

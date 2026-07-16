@@ -99,6 +99,27 @@ public:
 
     void setExpectedAttributes(const SumoXMLAttrMask& expected, const int depth = 2) override;
 
+    /// @name parallel row staging
+    /// @{
+
+    /// @brief rows may be staged in parallel once the schema is frozen (header written) and the writer thread is in use
+    bool supportsParallelRows() const override;
+
+    /// @brief a staging twin sharing the frozen schema; it collects rows in a local chunk and never writes itself
+    OutputFormatter* createRowStager() const override;
+
+    /// @brief copy the enclosing element state (staged parent attributes and tag stack) into the stager and reset its rows
+    void primeRowStager(OutputFormatter& stager) const override;
+
+    /** @brief appends the next unconsumed staged row of the given stager
+     *
+     * The row's values are copied verbatim (string contents re-based into this
+     * formatter's arena), so the resulting file is bitwise identical to a
+     * serial write of the same rows in the same order.
+     */
+    void appendStagedRow(ParquetFormatter& stager);
+    /// @}
+
 private:
     /// @brief non-template helpers; defined in the .cpp where arrow/parquet are available
     void writeStringAttr(const SumoXMLAttr attr, const std::string& val);

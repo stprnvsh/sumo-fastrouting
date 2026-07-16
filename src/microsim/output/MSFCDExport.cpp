@@ -28,6 +28,7 @@
 #include <thread>
 #include <utils/common/MsgHandler.h>
 #include <utils/iodevices/OutputDevice.h>
+#include <utils/iodevices/OutputDevice_RowStager.h>
 #include <utils/options/OptionsCont.h>
 #include <utils/geom/GeoConvHelper.h>
 #include <utils/geom/GeomHelper.h>
@@ -54,12 +55,32 @@
 // FCDWorkerPool definition
 // ===========================================================================
 namespace {
-/** @brief A persistent pool of worker threads which computes the expensive
- * per-vehicle output values (position, angle, slope, geo projection) in
- * parallel while the rows are still written in their original order.
+/// @brief the emission attributes which are computed eagerly by MSEmissionExport::writeEmissions
+SumoXMLAttrMask
+eagerEmissionAttributes() {
+    SumoXMLAttrMask mask;
+    mask.set(SUMO_ATTR_CO2);
+    mask.set(SUMO_ATTR_CO);
+    mask.set(SUMO_ATTR_HC);
+    mask.set(SUMO_ATTR_NOX);
+    mask.set(SUMO_ATTR_PMX);
+    mask.set(SUMO_ATTR_FUEL);
+    mask.set(SUMO_ATTR_ELECTRICITY);
+    return mask;
+}
+
+
+/** @brief A persistent pool of worker threads which takes the expensive part
+ * of the FCD output off the writing thread while the rows are still written
+ * in their original order.
  *
- * The values are bitwise identical to the single threaded computation because
- * exactly the same code runs on each vehicle; only the loop is partitioned.
+ * Two kinds of jobs exist: VALUES computes the per-vehicle values (position,
+ * angle, slope, geo projection) which the writing thread then serializes, and
+ * SERIALIZE runs the complete row serialization against per-thread staging
+ * devices (see OutputDevice::createRowStager) so the writing thread only
+ * appends the finished rows. Both keep the output bitwise identical to a
+ * single threaded run because exactly the same code runs on each vehicle;
+ * only the loop is partitioned.
  */
 class FCDWorkerPool {
 public:
@@ -67,43 +88,16 @@ public:
         shutdown();
     }
 
-    /// @brief fill in the values of all rows using numThreads threads (including the calling thread)
-    void computeAll(std::vector<MSFCDExport::VehicleState>& rows, const int numThreads,
-                    const bool useGeo, const bool useUTM, const SumoXMLAttrMask& mask) {
+    /// @brief bring up the workers and projection copies; returns whether the copies are usable
+    bool prepare(const int numThreads, const bool useGeo) {
         startWorkers(numThreads - 1, useGeo);
-        {
-            std::lock_guard<std::mutex> lock(myMutex);
-            myRows = &rows;
-            myDoGeo = useGeo && myClonesValid;
-            myDoUTM = useUTM;
-            myUTMOffset = GeoConvHelper::getFinal().getOffset();
-            myMask = mask;
-            myUnfinished = (int)myThreads.size();
-            myGeneration++;
-        }
-        myCondition.notify_all();
-        // the calling thread computes the last slice itself (using the shared
-        // GeoConvHelper instance which no worker touches)
-        std::string error;
-        try {
-            computeSlice((int)myThreads.size());
-        } catch (const std::exception& e) {
-            error = e.what();
-        }
-        {
-            std::unique_lock<std::mutex> lock(myMutex);
-            myDone.wait(lock, [this] {
-                return myUnfinished == 0;
-            });
-            if (error == "" && myError != "") {
-                error = myError;
-            }
-            myError = "";
-        }
-        myRows = nullptr;
-        if (error != "") {
-            throw ProcessError(error);
-        }
+        return myClonesValid;
+    }
+
+    /// @brief fill in the values of all rows (VALUES job); prepare() must have been called
+    void computeAll(std::vector<MSFCDExport::VehicleState>& rows, const SumoXMLAttrMask& mask,
+                    const bool useGeo, const bool useUTM) {
+        runJob(rows, Job::VALUES, mask, useGeo && myClonesValid, useUTM, -1., nullptr);
         if (useGeo && !myClonesValid) {
             // the projection could not be duplicated for the workers; convert here instead
             for (MSFCDExport::VehicleState& row : rows) {
@@ -112,7 +106,32 @@ public:
         }
     }
 
-    /// @brief join all workers and release the projection copies
+    /// @brief serialize all rows into per-thread staging devices (SERIALIZE job); prepare() must have been called
+    void serializeAll(OutputDevice& of, std::vector<MSFCDExport::VehicleState>& rows, const SumoXMLAttrMask& mask,
+                      const bool useGeo, const bool useUTM, const double maxLeaderDistance,
+                      const std::vector<std::string>& params) {
+        if (myStagers.empty()) {
+            for (int i = 0; i <= (int)myThreads.size(); i++) {
+                myStagers.push_back(of.createRowStager());
+            }
+        }
+        for (OutputDevice* const stager : myStagers) {
+            of.primeRowStager(*stager);
+        }
+        runJob(rows, Job::SERIALIZE, mask, useGeo, useUTM, maxLeaderDistance, &params);
+    }
+
+    /// @brief the staging device which serialized the given row
+    OutputDevice& stagerForRow(const int rowIdx, const int numRows) const {
+        const long long int numParts = (long long int)myThreads.size() + 1;
+        int part = (int)((long long int)rowIdx * numParts / numRows);
+        while ((long long int)numRows * (part + 1) / numParts <= rowIdx) {
+            part++;
+        }
+        return *myStagers[part];
+    }
+
+    /// @brief join all workers, release the projection copies and staging devices
     void shutdown() {
         if (!myThreads.empty()) {
             {
@@ -131,9 +150,66 @@ public:
         }
         myGeoClones.clear();
         myHaveClones = false;
+        for (OutputDevice* const stager : myStagers) {
+            delete stager;
+        }
+        myStagers.clear();
     }
 
 private:
+    /// @brief the kind of work performed by a job generation
+    enum class Job { VALUES, SERIALIZE };
+
+    /// @brief publish a job to the workers, run the calling thread's slice and wait for completion
+    void runJob(std::vector<MSFCDExport::VehicleState>& rows, const Job job, const SumoXMLAttrMask& mask,
+                const bool doGeo, const bool doUTM, const double maxLeaderDistance,
+                const std::vector<std::string>* const params) {
+        {
+            std::lock_guard<std::mutex> lock(myMutex);
+            myRows = &rows;
+            myJob = job;
+            myDoGeo = doGeo;
+            myDoUTM = doUTM;
+            myUTMOffset = GeoConvHelper::getFinal().getOffset();
+            myMask = mask;
+            myMaxLeaderDistance = maxLeaderDistance;
+            myParams = params;
+            myUnfinished = (int)myThreads.size();
+            myGeneration++;
+        }
+        myCondition.notify_all();
+        // the calling thread runs the last slice itself (using the shared
+        // GeoConvHelper instance which no worker touches)
+        std::string error;
+        try {
+            runSlice((int)myThreads.size());
+        } catch (const std::exception& e) {
+            error = e.what();
+        }
+        {
+            std::unique_lock<std::mutex> lock(myMutex);
+            myDone.wait(lock, [this] {
+                return myUnfinished == 0;
+            });
+            if (error == "" && myError != "") {
+                error = myError;
+            }
+            myError = "";
+        }
+        myRows = nullptr;
+        if (error != "") {
+            throw ProcessError(error);
+        }
+    }
+
+    /// @brief run one slice of the current job
+    void runSlice(const int part) {
+        if (myJob == Job::VALUES) {
+            computeSlice(part);
+        } else {
+            serializeSlice(part);
+        }
+    }
     /// @brief bring up the workers (and the projection copies) if not running yet
     void startWorkers(const int numWorkers, const bool useGeo) {
         if ((int)myThreads.size() == numWorkers && (!useGeo || myHaveClones)) {
@@ -189,7 +265,23 @@ private:
         }
     }
 
-    /// @brief the worker loop: wait for the next job generation, compute the assigned slice, count down
+    /// @brief serialize one contiguous slice of the rows into this slice's staging device
+    void serializeSlice(const int part) {
+        std::vector<MSFCDExport::VehicleState>& rows = *myRows;
+        const long long int numRows = (long long int)rows.size();
+        const long long int numParts = (long long int)myThreads.size() + 1;
+        const int begin = (int)(numRows * part / numParts);
+        const int end = (int)(numRows * (part + 1) / numParts);
+        const GeoConvHelper* const geo = part < (int)myThreads.size() ? myGeoClones[part] : &GeoConvHelper::getFinal();
+        OutputDevice_RowStager* const stager = static_cast<OutputDevice_RowStager*>(myStagers[part]);
+        for (int i = begin; i < end; i++) {
+            MSFCDExport::writeVehicle(*stager, rows[i].veh, nullptr, myMask, myDoGeo, myDoUTM,
+                                      myMaxLeaderDistance, *myParams, geo);
+            stager->endStagedRow();
+        }
+    }
+
+    /// @brief the worker loop: wait for the next job generation, run the assigned slice, count down
     void workerMain(const int part) {
         long long int lastGeneration = 0;
         while (true) {
@@ -204,7 +296,7 @@ private:
                 lastGeneration = myGeneration;
             }
             try {
-                computeSlice(part);
+                runSlice(part);
             } catch (const std::exception& e) {
                 std::lock_guard<std::mutex> lock(myMutex);
                 if (myError == "") {
@@ -222,6 +314,9 @@ private:
 
     /// @brief the worker threads
     std::vector<std::thread> myThreads;
+
+    /// @brief one staging device per slice (workers + calling thread), created on first use
+    std::vector<OutputDevice*> myStagers;
 
     /// @brief one projection copy per worker (entries may be nullptr)
     std::vector<GeoConvHelper*> myGeoClones;
@@ -255,10 +350,13 @@ private:
 
     /// @{ the description of the current job
     std::vector<MSFCDExport::VehicleState>* myRows = nullptr;
+    Job myJob = Job::VALUES;
     bool myDoGeo = false;
     bool myDoUTM = false;
     Position myUTMOffset;
     SumoXMLAttrMask myMask;
+    double myMaxLeaderDistance = -1.;
+    const std::vector<std::string>* myParams = nullptr;
     /// @}
 };
 
@@ -301,10 +399,19 @@ MSFCDExport::write(OutputDevice& of, const SUMOTime timestep, const SumoXMLTag t
         }
     }
 
+    bool wroteTimestep = false;
+    auto openTimestep = [&]() {
+        if (!wroteTimestep) {
+            of.openTag("timestep").writeTime(SUMO_ATTR_TIME, timestep);
+            wroteTimestep = true;
+        }
+    };
+
     const bool writeVehicles = tag == SUMO_TAG_NOTHING || tag == SUMO_TAG_VEHICLE;
     const bool parallel = writeVehicles && MSDevice_FCD::getThreads() > 1;
     std::vector<VehicleState> precomputed;
     std::vector<VehicleState>::size_type nextRow = 0;
+    bool staged = false;
     if (parallel) {
         for (MSVehicleControl::constVehIt it = vc.loadedVehBegin(); it != vc.loadedVehEnd(); ++it) {
             const SUMOVehicle* const veh = it->second;
@@ -317,16 +424,24 @@ MSFCDExport::write(OutputDevice& of, const SUMOTime timestep, const SumoXMLTag t
                 precomputed.back().veh = veh;
             }
         }
-        gFCDPool.computeAll(precomputed, MSDevice_FCD::getThreads(), useGeo, useUTM, mask);
+        if (!precomputed.empty()) {
+            const bool geoOK = gFCDPool.prepare(MSDevice_FCD::getThreads(), useGeo);
+            // rows may only be serialized on the workers when everything they
+            // evaluate is safe off the main thread; otherwise fall back to
+            // precomputing the values and serializing here
+            static const SumoXMLAttrMask eagerEmissions = eagerEmissionAttributes();
+            staged = of.supportsParallelRows() && params.empty() && maxLeaderDistance < 0
+                     && !(mask & eagerEmissions).any() && (!useGeo || geoOK);
+            if (staged) {
+                // the timestep element must be open so the stagers can copy its state
+                openTimestep();
+                gFCDPool.serializeAll(of, precomputed, mask, useGeo, useUTM, maxLeaderDistance, params);
+            } else {
+                gFCDPool.computeAll(precomputed, mask, useGeo, useUTM);
+            }
+        }
     }
 
-    bool wroteTimestep = false;
-    auto openTimestep = [&]() {
-        if (!wroteTimestep) {
-            of.openTag("timestep").writeTime(SUMO_ATTR_TIME, timestep);
-            wroteTimestep = true;
-        }
-    };
     if (!MSDevice_FCD::skipEmpty()) {
         openTimestep();
     }
@@ -348,7 +463,11 @@ MSFCDExport::write(OutputDevice& of, const SUMOTime timestep, const SumoXMLTag t
             }
             if (hasOutput) {
                 openTimestep();
-                writeVehicle(of, veh, pre, mask, useGeo, useUTM, maxLeaderDistance, params);
+                if (staged) {
+                    of.appendStagedRow(gFCDPool.stagerForRow((int)nextRow - 1, (int)precomputed.size()));
+                } else {
+                    writeVehicle(of, veh, pre, mask, useGeo, useUTM, maxLeaderDistance, params, &GeoConvHelper::getFinal());
+                }
             }
             // write persons and containers in the vehicle
             if (tag == SUMO_TAG_NOTHING || tag == SUMO_TAG_PERSON) {
@@ -413,7 +532,8 @@ MSFCDExport::cleanup() {
 void
 MSFCDExport::writeVehicle(OutputDevice& of, const SUMOVehicle* const veh, const VehicleState* const pre,
                           const SumoXMLAttrMask& mask, const bool useGeo, const bool useUTM,
-                          const double maxLeaderDistance, const std::vector<std::string>& params) {
+                          const double maxLeaderDistance, const std::vector<std::string>& params,
+                          const GeoConvHelper* const geo) {
     const MSVehicle* const microVeh = MSGlobals::gUseMesoSim ? nullptr : static_cast<const MSVehicle*>(veh);
     Position pos;
     if (pre != nullptr) {
@@ -421,9 +541,9 @@ MSFCDExport::writeVehicle(OutputDevice& of, const SUMOVehicle* const veh, const 
     } else {
         pos = veh->getPosition();
         if (useGeo) {
-            GeoConvHelper::getFinal().cartesian2geo(pos);
+            geo->cartesian2geo(pos);
         } else if (useUTM) {
-            pos.sub(GeoConvHelper::getFinal().getOffset());
+            pos.sub(geo->getOffset());
         }
     }
     if (useGeo) {

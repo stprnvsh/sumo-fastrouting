@@ -36,6 +36,7 @@
 #include "OutputDevice_COUT.h"
 #include "OutputDevice_CERR.h"
 #include "OutputDevice_Network.h"
+#include "OutputDevice_RowStager.h"
 #include "PlainXMLFormatter.h"
 #include <utils/common/StringUtils.h>
 #include <utils/common/UtilExceptions.h>
@@ -300,6 +301,33 @@ OutputDevice::closeTag(const std::string& comment) {
 
 void
 OutputDevice::postWriteHook() {}
+
+
+OutputDevice*
+OutputDevice::createRowStager() const {
+    OutputFormatter* const stager = myFormatter->createRowStager();
+    return stager == nullptr ? nullptr : new OutputDevice_RowStager(stager);
+}
+
+
+void
+OutputDevice::primeRowStager(OutputDevice& stager) {
+    myFormatter->primeRowStager(*stager.myFormatter);
+    static_cast<OutputDevice_RowStager&>(stager).reset();
+}
+
+
+void
+OutputDevice::appendStagedRow(OutputDevice& stager) {
+    if (myFormatter->getType() == OutputFormatterType::XML) {
+        static_cast<PlainXMLFormatter*>(myFormatter)->closeOpener(getOStream());
+        static_cast<OutputDevice_RowStager&>(stager).writeNextRow(getOStream());
+#ifdef HAVE_PARQUET
+    } else if (myFormatter->getType() == OutputFormatterType::PARQUET) {
+        static_cast<ParquetFormatter*>(myFormatter)->appendStagedRow(*static_cast<ParquetFormatter*>(stager.myFormatter));
+#endif
+    }
+}
 
 
 void

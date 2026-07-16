@@ -180,6 +180,13 @@ struct ParquetFormatter::Impl {
     /// @brief whether the schema has been constructed completely
     bool myWroteHeader = false;
 
+    /// @brief whether this formatter only stages rows for another (writing) formatter
+    bool myStagerMode = false;
+
+    /// @brief the next staged row / value to be consumed by the writing formatter (stagers only)
+    int myConsumeRow = 0;
+    size_t myConsumeVal = 0;
+
     /// @brief whether the columns should be checked for completeness
     bool myCheckColumns = false;
 
@@ -397,7 +404,8 @@ struct ParquetFormatter::Impl {
 
     /// @brief hand the current chunk to the writer thread (bounded queue)
     void enqueueChunk() {
-        if (myCurChunk == nullptr || myCurChunk->rows() == 0) {
+        if (myStagerMode || myCurChunk == nullptr || myCurChunk->rows() == 0) {
+            // a stager keeps its rows until the writing formatter consumes them
             return;
         }
         std::unique_lock<std::mutex> lock(myMutex);
@@ -559,6 +567,9 @@ struct ParquetFormatter::Impl {
     /// @brief flush all pending rows and stop the writer thread
     /// (end of document / destruction)
     void drainAndJoin() {
+        if (myStagerMode) {
+            return;
+        }
         enqueueChunk();  // the partial chunk, if any
         if (myWriterThread.joinable()) {
             {
@@ -646,7 +657,8 @@ ParquetFormatter::openTag(std::ostream& /* into */, const std::string& xmlElemen
     if (!myImpl->myWroteHeader) {
         myImpl->myCurrentTag = xmlElement;
     }
-    if (myImpl->myMaxDepth == (int)myImpl->myXMLStack.size() && myImpl->myWroteHeader && myImpl->myCurrentTag != xmlElement) {
+    // stagers run on worker threads where the message handler may not be used
+    if (myImpl->myMaxDepth == (int)myImpl->myXMLStack.size() && myImpl->myWroteHeader && !myImpl->myStagerMode && myImpl->myCurrentTag != xmlElement) {
         WRITE_WARNINGF("Encountered mismatch in XML tags (expected % but got %). Column names may be incorrect.", myImpl->myCurrentTag, xmlElement);
     }
 }
@@ -658,7 +670,7 @@ ParquetFormatter::openTag(std::ostream& /* into */, const SumoXMLTag& xmlElement
     if (!myImpl->myWroteHeader) {
         myImpl->myCurrentTag = toString(xmlElement);
     }
-    if (myImpl->myMaxDepth == (int)myImpl->myXMLStack.size() && myImpl->myWroteHeader && myImpl->myCurrentTag != toString(xmlElement)) {
+    if (myImpl->myMaxDepth == (int)myImpl->myXMLStack.size() && myImpl->myWroteHeader && !myImpl->myStagerMode && myImpl->myCurrentTag != toString(xmlElement)) {
         WRITE_WARNINGF("Encountered mismatch in XML tags (expected % but got %). Column names may be incorrect.", myImpl->myCurrentTag, toString(xmlElement));
     }
 }
@@ -689,7 +701,8 @@ ParquetFormatter::closeTag(std::ostream& into, const std::string& /* comment */)
     }
     bool writeBatch = false;
     if (myImpl->myNeedsWrite) {
-        if (myImpl->myCheckColumns && (int)myImpl->myXMLStack.size() == myImpl->myMaxDepth && myImpl->myExpectedAttrs != myImpl->mySeenAttrs) {
+        // the attribute completeness of staged rows was already checked on the first (serially written) row
+        if (myImpl->myCheckColumns && !myImpl->myStagerMode && (int)myImpl->myXMLStack.size() == myImpl->myMaxDepth && myImpl->myExpectedAttrs != myImpl->mySeenAttrs) {
             for (int i = 0; i < (int)myImpl->myExpectedAttrs.size(); ++i) {
                 if (myImpl->myExpectedAttrs.test(i) && !myImpl->mySeenAttrs.test(i)) {
                     WRITE_ERRORF("Incomplete attribute set, '%' is missing. This file format does not support Parquet output yet.",
@@ -863,6 +876,87 @@ ParquetFormatter::setExpectedAttributes(const SumoXMLAttrMask& expected, const i
     myImpl->myExpectedAttrs = expected;
     myImpl->myMaxDepth = depth;
     myImpl->myCheckColumns = expected.any();
+}
+
+
+bool
+ParquetFormatter::supportsParallelRows() const {
+    // the schema (and with it the column typing) must be frozen and the
+    // asynchronous staging path must be active before rows may be staged elsewhere
+    return myImpl->myAsync && myImpl->myWroteHeader && !myImpl->myStagerMode;
+}
+
+
+OutputFormatter*
+ParquetFormatter::createRowStager() const {
+    if (!supportsParallelRows()) {
+        return nullptr;
+    }
+    ParquetFormatter* const stager = new ParquetFormatter(myImpl->myHeaderFormat, "", true, myImpl->myBatchSize);
+    Impl& si = *stager->myImpl;
+    si.myStagerMode = true;
+    // share the frozen schema and typing so the stager behaves exactly like this formatter
+    si.mySchema = myImpl->mySchema;
+    si.myColTypes = myImpl->myColTypes;
+    si.myMaxDepth = myImpl->myMaxDepth;
+    si.myCheckColumns = myImpl->myCheckColumns;
+    si.myExpectedAttrs = myImpl->myExpectedAttrs;
+    si.myCurrentTag = myImpl->myCurrentTag;
+    si.myWroteHeader = true;
+    return stager;
+}
+
+
+void
+ParquetFormatter::primeRowStager(OutputFormatter& stager) const {
+    Impl& si = *static_cast<ParquetFormatter&>(stager).myImpl;
+    // mirror the enclosing element state: the staged parent attributes prefix
+    // every row and the tag stack drives the row size reset in closeTag
+    si.myXMLStack = myImpl->myXMLStack;
+    si.myRowSize = 0;
+    for (int i = 0; i < myImpl->myRowSize; ++i) {
+        si.nextSlot() = myImpl->myRow[i];
+    }
+    si.mySeenAttrs.reset();
+    si.myNeedsWrite = false;
+    if (si.myCurChunk != nullptr) {
+        si.myCurChunk->clear();
+    }
+    si.myConsumeRow = 0;
+    si.myConsumeVal = 0;
+}
+
+
+void
+ParquetFormatter::appendStagedRow(ParquetFormatter& stager) {
+    Impl& si = *stager.myImpl;
+    if (si.myCurChunk == nullptr || si.myConsumeRow >= si.myCurChunk->rows()) {
+        throw ProcessError(TL("Trying to consume more rows than were staged."));
+    }
+    if (myImpl->myCurChunk == nullptr) {
+        myImpl->myCurChunk = myImpl->takeFreeChunk();
+    }
+    Impl::RowChunk& dst = *myImpl->myCurChunk;
+    const Impl::RowChunk& src = *si.myCurChunk;
+    const int rowLen = src.rowLens[si.myConsumeRow];
+    for (int i = 0; i < rowLen; ++i) {
+        Impl::RowChunk::Val cv = src.vals[si.myConsumeVal + i];
+        if (cv.kind == Impl::StagedValue::Kind::STR) {
+            const unsigned strOff = (unsigned)dst.arena.size();
+            dst.arena.append(src.arena, cv.strOff, cv.strLen);
+            cv.strOff = strOff;
+        }
+        dst.vals.push_back(cv);
+    }
+    si.myConsumeVal += rowLen;
+    si.myConsumeRow++;
+    dst.rowLens.push_back(rowLen);
+    // the merged row replaces a serial write of the same row (see closeTag)
+    myImpl->mySeenAttrs.reset();
+    myImpl->myNeedsWrite = false;
+    if (dst.rows() >= Impl::CHUNK_ROWS) {
+        myImpl->enqueueChunk();
+    }
 }
 
 

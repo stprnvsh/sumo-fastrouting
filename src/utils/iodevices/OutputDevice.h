@@ -378,6 +378,30 @@ public:
         myFormatter->setExpectedAttributes(expected, depth);
     }
 
+    /// @name parallel row staging
+    /// Worker threads may serialize independent rows into staging devices
+    /// (createRowStager); the owning thread appends the staged rows in their
+    /// original order (appendStagedRow) which keeps the output bitwise
+    /// identical to a serial write. See OutputFormatter::supportsParallelRows.
+    /// @{
+
+    /// @brief whether rows may currently be serialized into staging devices
+    bool supportsParallelRows() const {
+        return myFormatter->supportsParallelRows();
+    }
+
+    /** @brief Returns a staging device for one worker thread (owned by the caller)
+     * @return the staging device or nullptr if the formatter does not support it
+     */
+    OutputDevice* createRowStager() const;
+
+    /// @brief prepares a staging device for the rows of the currently open element
+    void primeRowStager(OutputDevice& stager);
+
+    /// @brief appends the next unconsumed row of the given staging device to this device
+    void appendStagedRow(OutputDevice& stager);
+    /// @}
+
 protected:
     /// @brief Returns the associated ostream
     virtual std::ostream& getOStream() = 0;
