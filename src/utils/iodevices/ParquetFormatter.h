@@ -40,7 +40,8 @@ class ParquetFormatter : public OutputFormatter {
 public:
     /// @brief Constructor
     // for some motivation on the default batch size see https://stackoverflow.com/questions/76782018/what-is-actually-meant-when-referring-to-parquet-row-group-size
-    ParquetFormatter(const std::string& columnNames, const std::string& compression = "", const int batchSize = 1000000);
+    ParquetFormatter(const std::string& columnNames, const std::string& compression = "",
+                     const bool async = true, const int batchSize = 1000000);
 
     /// @brief Destructor (out-of-line: Impl is incomplete here)
     ~ParquetFormatter() override;

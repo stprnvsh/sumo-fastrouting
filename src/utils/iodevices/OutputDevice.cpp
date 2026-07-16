@@ -133,7 +133,8 @@ OutputDevice::getDevice(const std::string& name, bool usePrefix) {
     }
 #ifdef HAVE_PARQUET
     if (isParquet) {
-        dev->setFormatter(new ParquetFormatter(oc.getString("output.column-header"), oc.getString("output.compression")));
+        dev->setFormatter(new ParquetFormatter(oc.getString("output.column-header"), oc.getString("output.compression"),
+                                               oc.exists("output.async") ? oc.getBool("output.async") : true));
     }
 #endif
     dev->setPrecision();

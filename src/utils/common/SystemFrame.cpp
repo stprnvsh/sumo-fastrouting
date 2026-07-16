@@ -139,6 +139,9 @@ SystemFrame::addReportOptions(OptionsCont& oc) {
     oc.doRegister("output.compression", new Option_String());
     oc.addDescription("output.compression", "Output", TL("Defines the standard compression algorithm (currently only for parquet output)"));
 
+    oc.doRegister("output.async", new Option_Bool(true));
+    oc.addDescription("output.async", "Output", TL("Encode, compress and write columnar output (parquet) on a background thread"));
+
     oc.doRegister("output.format", new Option_String("xml"));
     oc.addDescription("output.format", "Output", TL("Defines the standard output format if not derivable from the file name ('xml', 'csv', 'parquet')"));
 
