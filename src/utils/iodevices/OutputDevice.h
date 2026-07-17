@@ -400,6 +400,14 @@ public:
 
     /// @brief appends the next unconsumed row of the given staging device to this device
     void appendStagedRow(OutputDevice& stager);
+
+    /** @brief appends all rows of the given staging device to this device at once
+     *
+     * Only valid when no other output may interleave with the staged rows.
+     * For Parquet the rows are handed to the writer thread as one block
+     * instead of being copied row by row.
+     */
+    void appendAllStagedRows(OutputDevice& stager);
     /// @}
 
 protected:

@@ -66,6 +66,13 @@ public:
         myConsumed = end;
     }
 
+    /// @brief copies the bytes of all unconsumed rows into the given stream (owning thread)
+    void writeAllRows(std::ostream& into) {
+        into.write(myBuffer.data() + myConsumed, (std::streamsize)(myBuffer.size() - myConsumed));
+        myConsumed = myBuffer.size();
+        myNextRow = myRowEnds.size();
+    }
+
     /// @brief drops all staged rows (called when the stager is primed for the next element)
     void reset() {
         myBuffer.clearBuffer();

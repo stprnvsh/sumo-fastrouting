@@ -142,6 +142,9 @@ SystemFrame::addReportOptions(OptionsCont& oc) {
     oc.doRegister("output.async", new Option_Bool(true));
     oc.addDescription("output.async", "Output", TL("Encode, compress and write columnar output (parquet) on a background thread"));
 
+    oc.doRegister("output.encode-threads", new Option_Integer(0));
+    oc.addDescription("output.encode-threads", "Output", TL("Defines the number of threads for encoding and compressing columnar output (parquet); 0 uses all cores, 1 encodes on the writer thread itself"));
+
     oc.doRegister("output.format", new Option_String("xml"));
     oc.addDescription("output.format", "Output", TL("Defines the standard output format if not derivable from the file name ('xml', 'csv', 'parquet')"));
 

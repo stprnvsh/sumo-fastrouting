@@ -37,6 +37,7 @@
 #endif
 #include <arrow/api.h>
 #include <arrow/io/api.h>
+#include <arrow/util/thread_pool.h>
 #include <parquet/arrow/writer.h>
 #ifdef _MSC_VER
 #pragma warning(pop)
@@ -135,8 +136,8 @@ struct ParquetFormatter::Impl {
         }
     };
 
-    Impl(const std::string& columnNames, const int batchSize, const bool async)
-        : myHeaderFormat(columnNames), myBatchSize(batchSize), myAsync(async) {}
+    Impl(const std::string& columnNames, const int batchSize, const bool async, const int encodeThreads)
+        : myHeaderFormat(columnNames), myBatchSize(batchSize), myAsync(async), myEncodeThreads(encodeThreads) {}
 
     /// @brief the format to use for the column names
     const std::string myHeaderFormat;
@@ -149,6 +150,9 @@ struct ParquetFormatter::Impl {
 
     /// @brief whether batches are encoded and written by a background thread
     const bool myAsync;
+
+    /// @brief the number of threads for encoding / compressing the columns of a row group
+    const int myEncodeThreads;
 
     /// @brief the currently read tag (only valid when generating the header)
     std::string myCurrentTag;
@@ -236,14 +240,22 @@ struct ParquetFormatter::Impl {
 
     /// @brief rows per chunk handed to the writer thread
     static const int CHUNK_ROWS = 65536;
-    /// @brief maximum number of chunks waiting for the writer thread
-    static const size_t QUEUE_DEPTH = 4;
+    /// @brief maximum number of rows waiting for the writer thread. The bound
+    /// is expressed in rows rather than chunks because chunk sizes vary widely:
+    /// the serial path fills chunks up to CHUNK_ROWS while parallel row stagers
+    /// (see enqueueStagedRows) hand over one small chunk per slice and step.
+    /// Four full chunks match the historic worst case memory; a single chunk
+    /// may exceed the bound by itself so that oversized chunks still make
+    /// progress.
+    static const int MAX_QUEUED_ROWS = 4 * CHUNK_ROWS;
 
     std::thread myWriterThread;
     std::mutex myMutex;
     std::condition_variable myCvProduce;
     std::condition_variable myCvConsume;
     std::deque<std::unique_ptr<RowChunk> > myQueue;
+    /// @brief the number of rows currently in the queue (guarded by myMutex)
+    int myQueuedRows = 0;
     /// @brief consumed chunks recycled back to the producer (arena capacity kept)
     std::vector<std::unique_ptr<RowChunk> > myFreeChunks;
     /// @brief the chunk currently being filled by the simulation thread
@@ -408,15 +420,21 @@ struct ParquetFormatter::Impl {
             // a stager keeps its rows until the writing formatter consumes them
             return;
         }
+        pushChunk(std::move(myCurChunk));
+    }
+
+    /// @brief append a filled chunk to the writer queue (bounded, kept in call order)
+    void pushChunk(std::unique_ptr<RowChunk> chunk) {
         std::unique_lock<std::mutex> lock(myMutex);
         if (!myWriterThread.joinable()) {
             myWriterThread = std::thread(&Impl::writerLoop, this);
         }
         myCvProduce.wait(lock, [this] {
-            return myQueue.size() < QUEUE_DEPTH || !myAsyncError.empty();
+            return myQueuedRows < MAX_QUEUED_ROWS || !myAsyncError.empty();
         });
         checkAsyncErrorLocked();
-        myQueue.push_back(std::move(myCurChunk));
+        myQueuedRows += chunk->rows();
+        myQueue.push_back(std::move(chunk));
         myCvConsume.notify_one();
     }
 
@@ -445,6 +463,7 @@ struct ParquetFormatter::Impl {
                 }
                 chunk = std::move(myQueue.front());
                 myQueue.pop_front();
+                myQueuedRows -= chunk->rows();
             }
             try {
                 consumeChunk(*chunk);
@@ -598,8 +617,8 @@ struct ParquetFormatter::Impl {
 // member method definitions
 // ===========================================================================
 ParquetFormatter::ParquetFormatter(const std::string& columnNames, const std::string& compression,
-                                   const bool async, const int batchSize)
-    : OutputFormatter(OutputFormatterType::PARQUET), myImpl(std::make_unique<Impl>(columnNames, batchSize, async)) {
+                                   const bool async, const int encodeThreads, const int batchSize)
+    : OutputFormatter(OutputFormatterType::PARQUET), myImpl(std::make_unique<Impl>(columnNames, batchSize, async, encodeThreads)) {
     if (compression == "snappy") {
         myImpl->myCompression = parquet::Compression::SNAPPY;
     } else if (compression == "gzip") {
@@ -691,11 +710,16 @@ ParquetFormatter::closeTag(std::ostream& into, const std::string& /* comment */)
         }
         auto arrow_stream = std::make_shared<ArrowOStreamWrapper>(into);
         std::shared_ptr<parquet::WriterProperties> props = parquet::WriterProperties::Builder().compression(myImpl->myCompression)->build();
-        // Level 3: with the background writer, let Arrow encode the columns of
-        // a row group in parallel on its CPU thread pool. The synchronous path
-        // keeps the historic single-threaded behavior.
+        // Arrow encodes / compresses the columns of a row group in parallel on its
+        // CPU thread pool (0 = default pool size, > 1 caps the pool); with 1 the
+        // encoding stays on the writing thread and no pool threads are spawned.
+        // The file bytes are identical either way.
+        const bool encodeParallel = myImpl->myAsync && myImpl->myEncodeThreads != 1;
+        if (encodeParallel && myImpl->myEncodeThreads > 1) {
+            PARQUET_THROW_NOT_OK(arrow::SetCpuThreadPoolCapacity(myImpl->myEncodeThreads));
+        }
         std::shared_ptr<parquet::ArrowWriterProperties> arrowProps =
-            parquet::ArrowWriterProperties::Builder().set_use_threads(myImpl->myAsync)->build();
+            parquet::ArrowWriterProperties::Builder().set_use_threads(encodeParallel)->build();
         myImpl->myParquetWriter = *parquet::arrow::FileWriter::Open(*myImpl->mySchema, arrow::default_memory_pool(), arrow_stream, props, arrowProps);
         myImpl->myWroteHeader = true;
     }
@@ -892,7 +916,7 @@ ParquetFormatter::createRowStager() const {
     if (!supportsParallelRows()) {
         return nullptr;
     }
-    ParquetFormatter* const stager = new ParquetFormatter(myImpl->myHeaderFormat, "", true, myImpl->myBatchSize);
+    ParquetFormatter* const stager = new ParquetFormatter(myImpl->myHeaderFormat, "", true, myImpl->myEncodeThreads, myImpl->myBatchSize);
     Impl& si = *stager->myImpl;
     si.myStagerMode = true;
     // share the frozen schema and typing so the stager behaves exactly like this formatter
@@ -919,7 +943,11 @@ ParquetFormatter::primeRowStager(OutputFormatter& stager) const {
     }
     si.mySeenAttrs.reset();
     si.myNeedsWrite = false;
-    if (si.myCurChunk != nullptr) {
+    if (si.myCurChunk == nullptr) {
+        // the previous chunk was handed to the writer thread (see enqueueStagedRows);
+        // recycle a consumed one to keep its buffer capacity
+        si.myCurChunk = myImpl->takeFreeChunk();
+    } else {
         si.myCurChunk->clear();
     }
     si.myConsumeRow = 0;
@@ -957,6 +985,21 @@ ParquetFormatter::appendStagedRow(ParquetFormatter& stager) {
     if (dst.rows() >= Impl::CHUNK_ROWS) {
         myImpl->enqueueChunk();
     }
+}
+
+
+void
+ParquetFormatter::enqueueStagedRows(ParquetFormatter& stager) {
+    Impl& si = *stager.myImpl;
+    if (si.myCurChunk == nullptr || si.myCurChunk->rows() == 0) {
+        return;
+    }
+    // rows this formatter staged itself (e.g. earlier empty timesteps) come first
+    myImpl->enqueueChunk();
+    myImpl->pushChunk(std::move(si.myCurChunk));
+    // the queued rows replace a serial write of the same rows (see closeTag)
+    myImpl->mySeenAttrs.reset();
+    myImpl->myNeedsWrite = false;
 }
 
 

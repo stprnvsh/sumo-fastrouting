@@ -40,8 +40,11 @@ class ParquetFormatter : public OutputFormatter {
 public:
     /// @brief Constructor
     // for some motivation on the default batch size see https://stackoverflow.com/questions/76782018/what-is-actually-meant-when-referring-to-parquet-row-group-size
+    // encodeThreads: 0 lets Arrow encode / compress the columns of a row group
+    // on its default thread pool (all cores), values > 1 cap that pool and
+    // 1 keeps the encoding on the writing thread itself
     ParquetFormatter(const std::string& columnNames, const std::string& compression = "",
-                     const bool async = true, const int batchSize = 1000000);
+                     const bool async = true, const int encodeThreads = 0, const int batchSize = 1000000);
 
     /// @brief Destructor (out-of-line: Impl is incomplete here)
     ~ParquetFormatter() override;
@@ -118,6 +121,15 @@ public:
      * serial write of the same rows in the same order.
      */
     void appendStagedRow(ParquetFormatter& stager);
+
+    /** @brief hands all rows staged by the given stager to the writer thread
+     *
+     * The stager's row storage is queued as one block (after any rows this
+     * formatter staged itself), so the file stays bitwise identical to a
+     * serial write of the same rows in the same order while the calling
+     * thread only performs a queue push instead of copying every value.
+     */
+    void enqueueStagedRows(ParquetFormatter& stager);
     /// @}
 
 private:

@@ -90,7 +90,9 @@ public:
 
     /// @brief bring up the workers and projection copies; returns whether the copies are usable
     bool prepare(const int numThreads, const bool useGeo) {
-        startWorkers(numThreads - 1, useGeo);
+        // all slices run on workers; the calling thread only publishes the job,
+        // appends the results and continues with the simulation
+        startWorkers(numThreads, useGeo);
         return myClonesValid;
     }
 
@@ -111,7 +113,7 @@ public:
                       const bool useGeo, const bool useUTM, const double maxLeaderDistance,
                       const std::vector<std::string>& params) {
         if (myStagers.empty()) {
-            for (int i = 0; i <= (int)myThreads.size(); i++) {
+            for (int i = 0; i < (int)myThreads.size(); i++) {
                 myStagers.push_back(of.createRowStager());
             }
         }
@@ -121,9 +123,16 @@ public:
         runJob(rows, Job::SERIALIZE, mask, useGeo, useUTM, maxLeaderDistance, &params);
     }
 
+    /// @brief append all staged rows slice by slice (only valid when no other output interleaves)
+    void appendAllStaged(OutputDevice& of) {
+        for (OutputDevice* const stager : myStagers) {
+            of.appendAllStagedRows(*stager);
+        }
+    }
+
     /// @brief the staging device which serialized the given row
     OutputDevice& stagerForRow(const int rowIdx, const int numRows) const {
-        const long long int numParts = (long long int)myThreads.size() + 1;
+        const long long int numParts = (long long int)myThreads.size();
         int part = (int)((long long int)rowIdx * numParts / numRows);
         while ((long long int)numRows * (part + 1) / numParts <= rowIdx) {
             part++;
@@ -160,7 +169,7 @@ private:
     /// @brief the kind of work performed by a job generation
     enum class Job { VALUES, SERIALIZE };
 
-    /// @brief publish a job to the workers, run the calling thread's slice and wait for completion
+    /// @brief publish a job to the workers and wait for its completion
     void runJob(std::vector<MSFCDExport::VehicleState>& rows, const Job job, const SumoXMLAttrMask& mask,
                 const bool doGeo, const bool doUTM, const double maxLeaderDistance,
                 const std::vector<std::string>* const params) {
@@ -178,22 +187,13 @@ private:
             myGeneration++;
         }
         myCondition.notify_all();
-        // the calling thread runs the last slice itself (using the shared
-        // GeoConvHelper instance which no worker touches)
         std::string error;
-        try {
-            runSlice((int)myThreads.size());
-        } catch (const std::exception& e) {
-            error = e.what();
-        }
         {
             std::unique_lock<std::mutex> lock(myMutex);
             myDone.wait(lock, [this] {
                 return myUnfinished == 0;
             });
-            if (error == "" && myError != "") {
-                error = myError;
-            }
+            error = myError;
             myError = "";
         }
         myRows = nullptr;
@@ -241,10 +241,10 @@ private:
     void computeSlice(const int part) {
         std::vector<MSFCDExport::VehicleState>& rows = *myRows;
         const long long int numRows = (long long int)rows.size();
-        const long long int numParts = (long long int)myThreads.size() + 1;
+        const long long int numParts = (long long int)myThreads.size();
         const int begin = (int)(numRows * part / numParts);
         const int end = (int)(numRows * (part + 1) / numParts);
-        const GeoConvHelper* const geo = part < (int)myThreads.size() ? myGeoClones[part] : &GeoConvHelper::getFinal();
+        const GeoConvHelper* const geo = myGeoClones[part];
         for (int i = begin; i < end; i++) {
             MSFCDExport::VehicleState& row = rows[i];
             row.pos = row.veh->getPosition();
@@ -269,10 +269,10 @@ private:
     void serializeSlice(const int part) {
         std::vector<MSFCDExport::VehicleState>& rows = *myRows;
         const long long int numRows = (long long int)rows.size();
-        const long long int numParts = (long long int)myThreads.size() + 1;
+        const long long int numParts = (long long int)myThreads.size();
         const int begin = (int)(numRows * part / numParts);
         const int end = (int)(numRows * (part + 1) / numParts);
-        const GeoConvHelper* const geo = part < (int)myThreads.size() ? myGeoClones[part] : &GeoConvHelper::getFinal();
+        const GeoConvHelper* const geo = myGeoClones[part];
         OutputDevice_RowStager* const stager = static_cast<OutputDevice_RowStager*>(myStagers[part]);
         for (int i = begin; i < end; i++) {
             MSFCDExport::writeVehicle(*stager, rows[i].veh, nullptr, myMask, myDoGeo, myDoUTM,
@@ -315,7 +315,7 @@ private:
     /// @brief the worker threads
     std::vector<std::thread> myThreads;
 
-    /// @brief one staging device per slice (workers + calling thread), created on first use
+    /// @brief one staging device per worker, created on first use
     std::vector<OutputDevice*> myStagers;
 
     /// @brief one projection copy per worker (entries may be nullptr)
@@ -412,6 +412,7 @@ MSFCDExport::write(OutputDevice& of, const SUMOTime timestep, const SumoXMLTag t
     std::vector<VehicleState> precomputed;
     std::vector<VehicleState>::size_type nextRow = 0;
     bool staged = false;
+    bool bulkAppended = false;
     if (parallel) {
         for (MSVehicleControl::constVehIt it = vc.loadedVehBegin(); it != vc.loadedVehEnd(); ++it) {
             const SUMOVehicle* const veh = it->second;
@@ -436,6 +437,17 @@ MSFCDExport::write(OutputDevice& of, const SUMOTime timestep, const SumoXMLTag t
                 // the timestep element must be open so the stagers can copy its state
                 openTimestep();
                 gFCDPool.serializeAll(of, precomputed, mask, useGeo, useUTM, maxLeaderDistance, params);
+                // without active transportables nothing can interleave with the vehicle
+                // rows, so whole slices are appended at once (for Parquet this is a
+                // queue push to the writer thread instead of copying every row) and
+                // the second loop over the vehicles is skipped entirely
+                const bool mayInterleave = tag == SUMO_TAG_NOTHING
+                                           && ((net->hasPersons() && net->getPersonControl().hasTransportables())
+                                               || (net->hasContainers() && net->getContainerControl().hasTransportables()));
+                if (!mayInterleave) {
+                    gFCDPool.appendAllStaged(of);
+                    bulkAppended = true;
+                }
             } else {
                 gFCDPool.computeAll(precomputed, mask, useGeo, useUTM);
             }
@@ -445,7 +457,8 @@ MSFCDExport::write(OutputDevice& of, const SUMOTime timestep, const SumoXMLTag t
     if (!MSDevice_FCD::skipEmpty()) {
         openTimestep();
     }
-    for (MSVehicleControl::constVehIt it = vc.loadedVehBegin(); it != vc.loadedVehEnd(); ++it) {
+    // when the rows were appended in bulk there is nothing left to write per vehicle
+    for (MSVehicleControl::constVehIt it = vc.loadedVehBegin(); !bulkAppended && it != vc.loadedVehEnd(); ++it) {
         const SUMOVehicle* const veh = it->second;
         if (isVisible(veh)) {
             const VehicleState* pre = nullptr;

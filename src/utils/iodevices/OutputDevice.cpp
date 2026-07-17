@@ -135,7 +135,8 @@ OutputDevice::getDevice(const std::string& name, bool usePrefix) {
 #ifdef HAVE_PARQUET
     if (isParquet) {
         dev->setFormatter(new ParquetFormatter(oc.getString("output.column-header"), oc.getString("output.compression"),
-                                               oc.exists("output.async") ? oc.getBool("output.async") : true));
+                                               oc.exists("output.async") ? oc.getBool("output.async") : true,
+                                               oc.exists("output.encode-threads") ? oc.getInt("output.encode-threads") : 0));
     }
 #endif
     dev->setPrecision();
@@ -325,6 +326,19 @@ OutputDevice::appendStagedRow(OutputDevice& stager) {
 #ifdef HAVE_PARQUET
     } else if (myFormatter->getType() == OutputFormatterType::PARQUET) {
         static_cast<ParquetFormatter*>(myFormatter)->appendStagedRow(*static_cast<ParquetFormatter*>(stager.myFormatter));
+#endif
+    }
+}
+
+
+void
+OutputDevice::appendAllStagedRows(OutputDevice& stager) {
+    if (myFormatter->getType() == OutputFormatterType::XML) {
+        static_cast<PlainXMLFormatter*>(myFormatter)->closeOpener(getOStream());
+        static_cast<OutputDevice_RowStager&>(stager).writeAllRows(getOStream());
+#ifdef HAVE_PARQUET
+    } else if (myFormatter->getType() == OutputFormatterType::PARQUET) {
+        static_cast<ParquetFormatter*>(myFormatter)->enqueueStagedRows(*static_cast<ParquetFormatter*>(stager.myFormatter));
 #endif
     }
 }
