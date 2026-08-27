@@ -549,6 +549,15 @@ else ()
     set(ZLIB_LIBRARIES "")
 endif ()
 
+find_package(CURL)
+if (CURL_FOUND)
+    set(HAVE_CURL 1)
+    include_directories(SYSTEM ${CURL_INCLUDE_DIRS})
+    set(ENABLED_FEATURES "${ENABLED_FEATURES} CURL")
+else ()
+    set(CURL_LIBRARIES "")
+endif ()
+
 find_package(Intl)
 if (Intl_FOUND)
     set(HAVE_INTL 1)
@@ -689,7 +698,7 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR}/src)
 set(commonlibs
         utils_distribution utils_handlers utils_shapes utils_options
         utils_xml utils_geom utils_common utils_importio utils_iodevices utils_traction_wire foreign_tcpip
-        ${XercesC_LIBRARIES} ${ZLIB_LIBRARIES} ${PROJ_LIBRARY} ${Intl_LIBRARIES} ${FMT_LIBRARY} ${PARQUET_LIBRARY} ${CMAKE_DL_LIBS})
+        ${XercesC_LIBRARIES} ${ZLIB_LIBRARIES} ${CURL_LIBRARIES} ${PROJ_LIBRARY} ${Intl_LIBRARIES} ${FMT_LIBRARY} ${PARQUET_LIBRARY} ${CMAKE_DL_LIBS})
 if (WIN32)
     set(commonlibs ${commonlibs} ws2_32)
 endif ()

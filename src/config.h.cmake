@@ -216,6 +216,9 @@
 /* defined if zlib is available */
 #cmakedefine HAVE_ZLIB
 
+/* defined if libcurl is available */
+#cmakedefine HAVE_CURL
+
 /* set to proj.h, proj_api.h or empty depending on which proj is available */
 #cmakedefine PROJ_API_FILE "@PROJ_API_FILE@"
 
