@@ -243,6 +243,7 @@ OutputDevice::getFilename() {
 void
 OutputDevice::close() {
     while (closeTag()) {}
+    onClose();
     for (std::map<std::string, OutputDevice*>::iterator i = myOutputDevices.begin(); i != myOutputDevices.end(); ++i) {
         if (i->second == this) {
             myOutputDevices.erase(i);
@@ -289,7 +290,8 @@ OutputDevice::openTag(const SumoXMLTag& xmlElement) {
 
 bool
 OutputDevice::closeTag(const std::string& comment) {
-    if (myFormatter->closeTag(getOStream(), comment)) {
+    // the formatter is already gone when a failed close is retried
+    if (myFormatter != nullptr && myFormatter->closeTag(getOStream(), comment)) {
         postWriteHook();
         return true;
     }
@@ -299,6 +301,10 @@ OutputDevice::closeTag(const std::string& comment) {
 
 void
 OutputDevice::postWriteHook() {}
+
+
+void
+OutputDevice::onClose() {}
 
 
 void

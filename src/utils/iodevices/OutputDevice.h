@@ -414,6 +414,15 @@ protected:
      */
     virtual void postWriteHook();
 
+    /** @brief Called when closing the device, before it is removed and deleted.
+     *
+     * Allows devices to flush remaining output to their target with the
+     * possibility of reporting failures (the destructor must not throw).
+     * Default implementation does nothing.
+     * @exception IOError If the remaining output could not be written
+     */
+    virtual void onClose();
+
 
 private:
     /// @brief map from names to output devices
