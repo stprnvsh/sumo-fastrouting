@@ -11,6 +11,8 @@ set(utils_iodevices_STAT_SRCS
    OutputDevice_File.h
    OutputDevice_Network.cpp
    OutputDevice_Network.h
+   OutputDevice_S3.cpp
+   OutputDevice_S3.h
    OutputDevice_String.cpp
    OutputDevice_String.h
    OutputFormatter.h

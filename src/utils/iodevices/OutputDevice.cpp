@@ -36,6 +36,7 @@
 #include "OutputDevice_COUT.h"
 #include "OutputDevice_CERR.h"
 #include "OutputDevice_Network.h"
+#include "OutputDevice_S3.h"
 #include "PlainXMLFormatter.h"
 #include <utils/common/StringUtils.h>
 #include <utils/common/UtilExceptions.h>
@@ -88,6 +89,8 @@ OutputDevice::getDevice(const std::string& name, bool usePrefix) {
     } else if (name == "stderr") {
         dev = OutputDevice_CERR::getDevice();
         isCSV = isParquet = false;
+    } else if (OutputDevice_S3::isS3(name)) {
+        dev = new OutputDevice_S3(name);
     } else if (FileHelpers::isSocket(name)) {
         try {
             const bool ipv6 = name[0] == '[';  // IPv6 addresses may be written like '[::1]:8000'
@@ -126,7 +129,12 @@ OutputDevice::getDevice(const std::string& name, bool usePrefix) {
             name2 = FileHelpers::appendBeforeExtension(name2, suffix);
         }
         name2 = StringUtils::substituteEnvironment(name2, &OptionsIO::getLoadTime());
-        dev = new OutputDevice_File(name2, isParquet);
+        if (OutputDevice_S3::isS3(name2)) {
+            // an output prefix such as "s3://bucket/run/" turns plain file names into S3 objects
+            dev = new OutputDevice_S3(name2);
+        } else {
+            dev = new OutputDevice_File(name2, isParquet);
+        }
     }
     if (isCSV) {
         dev->setFormatter(new CSVFormatter(oc.getString("output.column-header"), oc.getString("output.column-separator")[0]));
