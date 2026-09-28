@@ -25,17 +25,17 @@
 //                   between them folded into the arc weight.
 //
 // The topology (arcs/order/CCH) is metric-INDEPENDENT and built once from
-// the class-union successor sets. Weights are metric-DEPENDENT centisecond
+// the class-union successor sets. Weights are metric-DEPENDENT millisecond
 // integers recomputed from the caller's effort function (fillInputWeights /
 // computeArcWeight); forbidden arcs get exactly RoutingKit::inf_weight so
 // the arc set (topology) never changes.
 //
 // ARC WEIGHT CONVENTION (load-bearing):
-//   w(u -> to) = round(100 * ( viaEffort(u..to) + effort(to) ))   [centiseconds]
+//   w(u -> to) = round(WEIGHT_SCALE * ( viaEffort(u..to) + effort(to) ))   [milliseconds]
 // so a path u0->u1->...->uk sums arc weights = via + effort(u1..uk), and the
 // FULL route cost equals  query_distance + effort(u0)  (the source edge's
 // own effort, added back by the caller as the source seed). This is NOT
-// round(100*recomputeCosts({u,to})): that would double-count effort(u) on
+// round(WEIGHT_SCALE*recomputeCosts({u,to})): that would double-count effort(u) on
 // every hop of a multi-edge path.
 /****************************************************************************/
 #pragma once
@@ -90,6 +90,9 @@ public:
 
     /// @brief sentinel for "not a routable node"
     static const unsigned INVALID_NODE;
+
+    /// @brief integer weight units per second of effort (milliseconds; path costs must stay below inf_weight, about 24.8 days)
+    static constexpr double WEIGHT_SCALE = 1000.;
 
     /** @brief Build the union line graph + CCH from the given edges.
      *
@@ -325,7 +328,7 @@ public:
         return computeArcWeightRaw(a, effort, veh, time);
     }
 
-    /** @brief Fill a centisecond input-weight buffer for one vehicle class.
+    /** @brief Fill a millisecond input-weight buffer for one vehicle class.
      *
      * Primes the class's connection mask on first use (see primeClassMask for
      * the synchronization contract), then applies computeArcWeight per arc.
@@ -397,20 +400,20 @@ private:
     }
 
     /** @brief The unmasked weight of one arc: via-chain effort + head-edge
-     * effort, rounded to centiseconds and clamped below inf_weight (NaN /
+     * effort, rounded to milliseconds and clamped below inf_weight (NaN /
      * inf / overflow become inf_weight = forbidden). */
     unsigned computeArcWeightRaw(unsigned a, EffortOperation effort,
                                  const V* veh, double time) const {
         const E* to = myNodeToEdge[myArcHead[a]];
-        const double bigEffort = (double)(RoutingKit::inf_weight - 1) / 100.0;
+        const double bigEffort = (double)(RoutingKit::inf_weight - 1) / WEIGHT_SCALE;
         const double eff = viaChainEffort(myArcVia[a], effort, veh, time)
                            + effort(to, veh, time);
         if (!(eff < bigEffort)) {
             return RoutingKit::inf_weight;
         }
-        const long long cs = std::llround(eff * 100.0);
-        return (unsigned)(cs < 0 ? 0 : (cs >= (long long)RoutingKit::inf_weight
-                                        ? RoutingKit::inf_weight - 1 : cs));
+        const long long weight = std::llround(eff * WEIGHT_SCALE);
+        return (unsigned)(weight < 0 ? 0 : (weight >= (long long)RoutingKit::inf_weight
+                                            ? RoutingKit::inf_weight - 1 : weight));
     }
 
     /// @brief node index -> backing edge

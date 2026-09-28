@@ -247,7 +247,7 @@ public:
         if (myPeriodEnd != nullptr && myQuery.get_distance() > 0) {
             const SUMOTime boundary = myPeriodEnd(msTime);
             if (boundary != SUMOTime_MAX
-                    && msTime + TIME2STEPS((double)myQuery.get_distance() / 100.) >= boundary) {
+                    && msTime + TIME2STEPS((double)myQuery.get_distance() / GRAPH::WEIGHT_SCALE) >= boundary) {
                 MetricPtr altMetric = myMetricProvider(vClass, boundary, vehicle);
                 if (altMetric != nullptr && altMetric != metric
                         && runQuery(altMetric, *sources, *targets, vehicle, t)) {
@@ -298,7 +298,7 @@ private:
     /** @brief Bind the query to @p metric (rebinding only on change), seed
      * all sources and targets and run it; true iff a connection was found.
      *
-     * Source seed = the entry edge's OWN centisecond effort. The arc-weight
+     * Source seed = the entry edge's OWN millisecond effort. The arc-weight
      * convention (arc weight = effort of destination) omits the source
      * edge's effort, so choosing the cheapest zone-entry among members
      * requires adding it back per source -- otherwise the argmin ignores
@@ -312,10 +312,10 @@ private:
         } else {
             myQuery.reset();
         }
-        const double bigEff = (double)(RoutingKit::inf_weight - 1) / 100.0;
+        const double bigEff = (double)(RoutingKit::inf_weight - 1) / GRAPH::WEIGHT_SCALE;
         for (const unsigned s : sources) {
             const double eff = this->getEffort(myGraph->edgeOf(s), vehicle, t);
-            const unsigned d = eff < bigEff ? (unsigned)llround(eff * 100.0) : RoutingKit::inf_weight - 1;
+            const unsigned d = eff < bigEff ? (unsigned)llround(eff * GRAPH::WEIGHT_SCALE) : RoutingKit::inf_weight - 1;
             myQuery.add_source(s, d);
         }
         for (const unsigned tt : targets) {
