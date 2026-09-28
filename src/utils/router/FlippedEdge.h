@@ -90,6 +90,16 @@ public:
         return edge->getOriginalEdge()->getTravelTimeStaticRandomized(edge->getOriginalEdge(), veh, time);
     }
 
+    /** @brief Returns the time for travelling on the given edge with the given vehicle at the given time, weighted by edge priority
+     * @param[in] edge The edge
+     * @param[in] veh The vehicle
+     * @param[in] time The time
+     * @return The priority weighted time for travelling on the given edge with the given vehicle at the given time
+     */
+    static double getTravelTimeStaticPriorityFactor(const FlippedEdge<E, N, V>* const edge, const V* const veh, double time) {
+        return edge->getOriginalEdge()->getTravelTimeStaticPriorityFactor(edge->getOriginalEdge(), veh, time);
+    }
+
     /** @brief Returns the via successors
      * @param[in] vClass The vehicle class
      * @param[in] ignoreTransientPermissions Unused parameter

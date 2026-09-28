@@ -118,7 +118,14 @@ computeRoutes(RONet& net, ROLoader& loader, OptionsCont& oc) {
         throw ProcessError(TLF("Routing algorithm '%' does not support restriction-params", routingAlgorithm));
     }
 
-    if (measure == "traveltime" && priorityFactor == 0) {
+    // positive priority factors only raise travel times, so every algorithm routes on them as in sumo;
+    // dijkstra (stepping time by travel time) and negative factors (breaking astar's bounds) keep the effort branch
+    if (measure == "traveltime" && (priorityFactor == 0 || (priorityFactor > 0 && routingAlgorithm != "dijkstra"))) {
+        auto effortFunction = ttFunction;
+        if (priorityFactor > 0 && ROEdge::initPriorityFactor(priorityFactor)) {
+            effortFunction = &ROEdge::getTravelTimeStaticPriorityFactor;
+            op = effortFunction; // for the railway router
+        }
         if (routingAlgorithm == "dijkstra") {
             router = new DijkstraRouter<ROEdge, ROVehicle>(ROEdge::getAllEdges(), oc.getBool("ignore-errors"), ttFunction, nullptr, false, nullptr, net.hasPermissions(), oc.isSet("restriction-params"));
         } else if (routingAlgorithm == "astar") {
@@ -144,20 +151,20 @@ computeRoutes(RONet& net, ROLoader& loader, OptionsCont& oc) {
                 lookup = std::make_shared<const AStar::LMLT>(oc.getString("astar.landmark-distances"), ROEdge::getAllEdges(), &forward, &backward, &defaultVehicle,
                          oc.isSet("astar.save-landmark-distances") ? oc.getString("astar.save-landmark-distances") : "", oc.getInt("routing-threads"), mapMatcher);
             }
-            router = new AStar(ROEdge::getAllEdges(), oc.getBool("ignore-errors"), ttFunction, lookup, net.hasPermissions(), oc.isSet("restriction-params"));
+            router = new AStar(ROEdge::getAllEdges(), oc.getBool("ignore-errors"), effortFunction, lookup, net.hasPermissions(), oc.isSet("restriction-params"));
         } else if (routingAlgorithm == "CH" && !net.hasPermissions() && !gRoutingPreferences && !net.hasSpeedRestrictions()) {
             const SUMOTime weightPeriod = (oc.isSet("weight-files") ?
                                            string2time(oc.getString("weight-period")) :
                                            SUMOTime_MAX);
             router = new CHRouter<ROEdge, ROVehicle>(
-                ROEdge::getAllEdges(), oc.getBool("ignore-errors"), ttFunction, SVC_IGNORING, weightPeriod, net.hasPermissions(), oc.isSet("restriction-params"));
+                ROEdge::getAllEdges(), oc.getBool("ignore-errors"), effortFunction, SVC_IGNORING, weightPeriod, net.hasPermissions(), oc.isSet("restriction-params"));
         } else if (routingAlgorithm == "CHWrapper" || routingAlgorithm == "CH") {
             // use CHWrapper instead of CH if the net has permissions, preferences or speed restriction
             const SUMOTime weightPeriod = (oc.isSet("weight-files") ?
                                            string2time(oc.getString("weight-period")) :
                                            SUMOTime_MAX);
             router = new CHRouterWrapper<ROEdge, ROVehicle>(
-                ROEdge::getAllEdges(), oc.getBool("ignore-errors"), ttFunction,
+                ROEdge::getAllEdges(), oc.getBool("ignore-errors"), effortFunction,
                 begin, end, weightPeriod, net.hasPermissions(), oc.getInt("routing-threads"));
         } else if (routingAlgorithm == "CCH") {
             // One weight-independent hierarchy over the union graph; one
@@ -176,9 +183,9 @@ computeRoutes(RONet& net, ROLoader& loader, OptionsCont& oc) {
             // Process-lifetime singletons: the topology and metric store are
             // shared by every router clone until duarouter exits.
             ROCCHGraph* cchGraph = new ROCCHGraph(ROEdge::getAllEdges());
-            ROCCHMetrics::init(cchGraph, ttFunction, begin, weightPeriod);
+            ROCCHMetrics::init(cchGraph, effortFunction, begin, weightPeriod);
             SUMOAbstractRouter<ROEdge, ROVehicle>* fallback = new AStarRouter<ROEdge, ROVehicle, ROMapMatcher>(
-                ROEdge::getAllEdges(), oc.getBool("ignore-errors"), ttFunction,
+                ROEdge::getAllEdges(), oc.getBool("ignore-errors"), effortFunction,
                 nullptr, net.hasPermissions(), oc.isSet("restriction-params"));
             // restriction-params are handled natively: each distinct
             // restriction profile gets its own masked metric (see
@@ -186,7 +193,7 @@ computeRoutes(RONet& net, ROLoader& loader, OptionsCont& oc) {
             // trip crosses a weight-period boundary re-query on the next
             // period's metric.
             router = new CCHRouter<ROEdge, ROVehicle, ROCCHGraph>(
-                cchGraph, &ROCCHMetrics::get, ttFunction,
+                cchGraph, &ROCCHMetrics::get, effortFunction,
                 oc.getBool("ignore-errors"), fallback,
                 hasWeights ? &ROCCHMetrics::periodEnd : nullptr);
         } else if (routingAlgorithm == "arcflag") {
@@ -196,8 +203,11 @@ computeRoutes(RONet& net, ROLoader& loader, OptionsCont& oc) {
             KDTreePartition<ROEdge, RONode, ROVehicle>* partition = new KDTreePartition<ROEdge, RONode, ROVehicle>(NUMBER_OF_LEVELS, ROEdge::getAllEdges(), net.hasPermissions(), oc.isSet("restriction-params"));
             partition->init(&defaultVehicle);
             auto reversedTtFunction = gWeightsRandomFactor > 1 ? &FlippedEdge<ROEdge, RONode, ROVehicle>::getTravelTimeStaticRandomized : &FlippedEdge<ROEdge, RONode, ROVehicle>::getTravelTimeStatic;
+            if (effortFunction == &ROEdge::getTravelTimeStaticPriorityFactor) {
+                reversedTtFunction = &FlippedEdge<ROEdge, RONode, ROVehicle>::getTravelTimeStaticPriorityFactor;
+            }
             router = new AFRouter<ROEdge, RONode, ROVehicle, ROMapMatcher>(ROEdge::getAllEdges(),
-                    partition, oc.getBool("ignore-errors"), ttFunction, reversedTtFunction, (oc.isSet("weight-files") ? string2time(oc.getString("weight-period")) : SUMOTime_MAX),
+                    partition, oc.getBool("ignore-errors"), effortFunction, reversedTtFunction, (oc.isSet("weight-files") ? string2time(oc.getString("weight-period")) : SUMOTime_MAX),
                     nullptr, nullptr, net.hasPermissions(), oc.isSet("restriction-params"));
         } else {
             throw ProcessError(TLF("Unknown routing algorithm '%'!", routingAlgorithm));
