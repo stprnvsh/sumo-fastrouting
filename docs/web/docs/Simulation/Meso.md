@@ -149,6 +149,12 @@ The following parameters are used by the model:
 !!! note
     The meso-LTM model achieves more realistic simulation for urban queuing dynamics. The original meso model (Eissfeldt) achieves instant propagation of gaps when queued traffic starts to flow again (i.e. at a traffic light). In contrast, the meso-LTM model distinguishes between a queue that has space at the upstream end and a queue that has space ad the downstream end.
 
+### Parallel simulation
+
+With **--meso-ltm** the simulation loop can use several threads (option **--threads N**). Every step runs in rounds: the vehicles that are due to leave their segment are moved on the worker threads (all moves onto an edge on the same thread) and the main thread then applies the effects on shared state (departures from the segments of other edges, the scheduling of the next events and the registrations at junctions) in a fixed order and runs the remaining events. Since the vehicles of a step are checked out of their time order, junction control ignores foes that are due before the checked vehicle (they have left or been rescheduled by then in the single-threaded order). Rounds with few moves run on the main thread.
+
+Within a round the vehicles of different edges may be moved out of their exact time order, so the results differ slightly from the single-threaded simulation but they do not depend on the number of threads. The following stay on the main thread: vehicles with stops or passengers, arrivals, teleports and all moves on segments carrying reminders other than mean data (rerouters, calibrators, drive ways). Mean data is collected from all threads, so the last digits of its values may differ between runs with different thread counts. Overtaking (**--meso-overtaking**) draws its random numbers from the random number generator of the edge in this mode and the junction model parameter *jmIgnoreFoeProb* is not supported.
+
 ## Lateral Model
 
 Lateral movement is not modelled explicitly. Vehicles may overtake each

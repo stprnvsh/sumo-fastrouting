@@ -111,6 +111,9 @@ public:
     /** Information whether positions will be interpolated */
     static bool gMesoInterpolatePos;
 
+    /** Information whether the mesoscopic simulation runs on several threads (see MELoop::simulateParallel) */
+    static bool gMesoParallelLoop;
+
     /// mesoscopic simulation infrastructure
     static MELoop* gMesoNet;
 

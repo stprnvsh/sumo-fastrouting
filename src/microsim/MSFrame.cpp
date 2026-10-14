@@ -1147,6 +1147,9 @@ MSFrame::checkOptions() {
     }
     if (oc.getInt("threads") > 1) {
         WRITE_WARNING(TL("The option --threads has known problems and does NOT provide meaningful speedup at this time (https://github.com/eclipse-sumo/sumo/issues/4767). Using it is not recommended!"));
+        if (oc.getBool("mesosim") && (!oc.getBool("meso-ltm") || oc.getFloat("weights.separate-turns") > 0)) {
+            WRITE_WARNING(TL("The mesoscopic simulation runs on one thread: option --threads needs --meso-ltm and no --weights.separate-turns."));
+        }
     }
     if (oc.getBool("mapmatch.junctions") && oc.isDefault("junction-taz")) {
         oc.setDefault("junction-taz", "true");
@@ -1232,6 +1235,7 @@ MSFrame::setMSGlobals(OptionsCont& oc) {
     }
     MSGlobals::gNumSimThreads = oc.getInt("threads");
     MSGlobals::gNumThreads = MAX2(MSGlobals::gNumSimThreads, oc.getInt("device.rerouting.threads"));
+    MSGlobals::gMesoParallelLoop = MSGlobals::gUseMesoSim && MSGlobals::gNumSimThreads > 1 && oc.getBool("meso-ltm") && MSGlobals::gWeightsSeparateTurns == 0;
 
     MSGlobals::gEmergencyDecelWarningThreshold = oc.getFloat("emergencydecel.warning-threshold");
     MSGlobals::gMinorPenalty = oc.getFloat("weights.minor-penalty");

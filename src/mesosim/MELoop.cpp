@@ -23,9 +23,14 @@
 #include <vector>
 #include <map>
 #include <cmath>
+#include <algorithm>
 
+#ifdef HAVE_FOX
+#include <utils/foxtools/MFXWorkerThread.h>
+#endif
 #include <microsim/MSNet.h>
 #include <microsim/MSEdge.h>
+#include <microsim/MSEdgeControl.h>
 #include <microsim/MSGlobals.h>
 #include <microsim/MSLane.h>
 #include <microsim/MSVehicle.h>
@@ -41,6 +46,8 @@
 #include "MEVehicle.h"
 
 long long int MELoop::LeaderEvent::myEventCounter(0);
+thread_local MELoop::DeferredOps* MELoop::myDeferred(nullptr);
+const int MELoop::MIN_PARALLEL_MOVES(64);
 
 // ===========================================================================
 // method definitions
@@ -61,6 +68,10 @@ MELoop::~MELoop() {
 
 void
 MELoop::simulate(SUMOTime tMax) {
+    if (MSGlobals::gMesoParallelLoop) {
+        simulateParallel(tMax);
+        return;
+    }
     while (!myLeaderCars.empty()) {
         LeaderEvent e = myLeaderCars.top();
         assert(e.time > tMax - DELTA_T);
@@ -68,18 +79,22 @@ MELoop::simulate(SUMOTime tMax) {
             return;
         }
         myLeaderCars.pop();
-        while (!myInvalidatedLeaderCars.empty() && e.time > myInvalidatedLeaderCars.top().time) {
-            myInvalidatedLeaderCars.pop();
-        }
-        if (!myInvalidatedLeaderCars.empty()) {
-            if (wasInvalidated(e)) {
-                continue;
-            }
+        if (skipInvalidated(e)) {
+            continue;
         }
         //std::cout << SIMTIME << " checkChar " << e.veh->getID() << " on=" << e.veh->getSegment()->getID() << " t=" << e.time << " nid=" << e.veh->getNumericalID() << "\n";
         checkCar(e.veh);
         assert(myLeaderCars.empty() || myLeaderCars.top().time >= e.time);
     }
+}
+
+
+bool
+MELoop::skipInvalidated(const LeaderEvent& e) {
+    while (!myInvalidatedLeaderCars.empty() && e.time > myInvalidatedLeaderCars.top().time) {
+        myInvalidatedLeaderCars.pop();
+    }
+    return !myInvalidatedLeaderCars.empty() && wasInvalidated(e);
 }
 
 
@@ -153,6 +168,21 @@ MELoop::changeSegment(MEVehicle* veh, SUMOTime leaveTime, MESegment* const toSeg
                     veh->processStop();
                 }
                 veh->getEdge()->getLanes()[0]->removeParking(veh);  // TODO for GUI only
+            } else if (myDeferred != nullptr && &onSegment->getEdge() != &toSegment->getEdge()) {
+                // parallel loop: the source segment belongs to the edge of another thread, so the departure
+                // is prepared here and completed on the main thread, which also applies the new event time
+                DeferredOps::Send s;
+                s.from = onSegment;
+                s.veh = veh;
+                s.qIdx = veh->getQueIndex();
+                s.link = onSegment->getLink(veh);
+                s.time = leaveTime;
+                s.eventTime = -1;
+                s.queued = veh->getQueuingTimeLoss() > 0;
+                s.headway = onSegment->prepareSend(veh, toSegment, qIdx, leaveTime, MSMoveReminder::NOTIFICATION_JUNCTION);
+                myDeferred->sends.push_back(s);
+                toSegment->receive(veh, qIdx, leaveTime, false, ignoreLink, true, &myDeferred->sends.back().eventTime);
+                return entry;
             } else {
                 onSegment->send(veh, toSegment, qIdx, leaveTime, onSegment->getNextSegment() == nullptr ? MSMoveReminder::NOTIFICATION_JUNCTION : MSMoveReminder::NOTIFICATION_SEGMENT);
             }
@@ -207,9 +237,11 @@ MELoop::checkCar(MEVehicle* veh) {
             || (!veh->isStoppedTriggered() && veh->isStoppedParking()))) {
         veh->setBlockTime(leaveTime);
     }
+    // receiving segment has recently received another vehicle or the junction is blocked
+    SUMOTime newEventTime = nextEntry;
     if (nextEntry == SUMOTime_MAX) {
         // all usable queues on the next segment are full
-        SUMOTime newEventTime = MAX3(toSegment->getEventTime() + 1, leaveTime + 1, leaveTime + myFullRecheckInterval);
+        newEventTime = MAX3(toSegment->getEventTime() + 1, leaveTime + 1, leaveTime + myFullRecheckInterval);
         if (MSGlobals::gTimeToGridlock > 0) {
             // if teleporting is enabled, make sure we look at the vehicle when the gridlock-time is up
             const SUMOTime recheck = veh->getBlockTime() + 1 + MSGlobals::gTimeToGridlock;
@@ -223,12 +255,8 @@ MELoop::checkCar(MEVehicle* veh) {
                 newEventTime = MIN2(newEventTime, recheck);
             }
         }
-        veh->setEventTime(newEventTime);
-    } else {
-        // receiving segment has recently received another vehicle or the junction is blocked
-        veh->setEventTime(nextEntry);
     }
-    addLeaderCar(veh, teleporting ? nullptr : onSegment->getLink(veh));
+    addLeaderCar(veh, teleporting ? nullptr : onSegment->getLink(veh), newEventTime);
 }
 
 
@@ -296,9 +324,27 @@ MELoop::teleportVehicle(MEVehicle* veh, MESegment* const toSegment, bool disconn
 
 
 void
-MELoop::addLeaderCar(MEVehicle* veh, MSLink* link) {
+MELoop::addLeaderCar(MEVehicle* veh, MSLink* link, SUMOTime blockTime) {
+    if (myDeferred != nullptr) {
+        // parallel loop: other threads still read the current event time of this queue leader
+        myDeferred->leaders.push_back(DeferredOps::Leader{veh, link, blockTime});
+        return;
+    }
+    veh->setEventTime(MAX2(veh->getEventTime(), blockTime));
     myLeaderCars.push(LeaderEvent(veh));
     veh->setApproaching(link);
+}
+
+
+void
+MELoop::segmentChanged(MESegment* s) {
+    if (MSGlobals::gMesoParallelLoop && MSGlobals::gMesoLimitedJunctionControl) {
+        if (myDeferred != nullptr) {
+            myDeferred->changed.push_back(s);
+        } else {
+            myChanged.push_back(s);
+        }
+    }
 }
 
 
@@ -311,6 +357,10 @@ MELoop::clearState() {
 
 void
 MELoop::removeLeaderCar(MEVehicle* v) {
+    if (myDeferred != nullptr) {
+        myDeferred->invalidated.push_back(std::make_pair(v, v->getEventTime()));
+        return;
+    }
     myInvalidatedLeaderCars.push(LeaderEvent(v));
 }
 
@@ -421,5 +471,159 @@ MELoop::LeaderEvent::LeaderEvent(MEVehicle* v):
     eventIndex(myEventCounter++),
     nid(v->getNumericalID()),
     veh(v) { }
+
+
+// ===========================================================================
+// parallel loop
+// ===========================================================================
+#ifdef HAVE_FOX
+class MELoop::RoundTask : public MFXWorkerThread::Task {
+public:
+    RoundTask(MELoop& loop, const std::vector<std::pair<int, LeaderEvent> >& events, DeferredOps& ops)
+        : myLoop(loop), myEvents(events), myOps(ops) {}
+
+    void run(MFXWorkerThread* /*context*/) override {
+        myDeferred = &myOps;
+        try {
+            for (const std::pair<int, LeaderEvent>& e : myEvents) {
+                myLoop.checkCar(e.second.veh);
+            }
+        } catch (...) {
+            myDeferred = nullptr;
+            throw;
+        }
+        myDeferred = nullptr;
+    }
+
+private:
+    MELoop& myLoop;
+    const std::vector<std::pair<int, LeaderEvent> >& myEvents;
+    DeferredOps& myOps;
+};
+#endif
+
+
+bool
+MELoop::isParallelSafe(const MEVehicle* veh, const MESegment* on, const MESegment* to) const {
+    // the move may only read its own vehicle and write its target edge: no stop handling, nobody aboard,
+    // no arrival on entering the edge, no teleport due and no reminder on either segment bound to the main thread
+    if (veh->isStopped() || veh->hasStops() || veh->getPersonNumber() > 0 || veh->getContainerNumber() > 0) {
+        return false;
+    }
+    if (&on->getEdge() != &to->getEdge() && veh->succEdge(2) == nullptr) {
+        return false; // entering the last edge of the route
+    }
+    const SUMOTime waiting = veh->getWaitingTime();
+    if ((MSGlobals::gTimeToGridlock > 0 && waiting > MSGlobals::gTimeToGridlock)
+            || (MSGlobals::gTimeToTeleportDisconnected >= 0 && waiting > MSGlobals::gTimeToTeleportDisconnected)) {
+        return false;
+    }
+    return !on->hasSerialReminders() && !to->hasSerialReminders();
+}
+
+
+void
+MELoop::simulateParallel(SUMOTime tMax) {
+#ifdef HAVE_FOX
+    MFXWorkerThread::Pool& pool = MSNet::getInstance()->getEdgeControl().getThreadPool();
+    const int numThreads = MSGlobals::gNumSimThreads;
+    std::vector<DeferredOps> ops(numThreads);
+    std::vector<LeaderEvent> serial;
+    std::vector<std::vector<std::pair<int, LeaderEvent> > > parallel(numThreads); // per thread: target edge, event
+    // a round runs everything that is due; what it reschedules within the step is due again in the next round
+    while (!myLeaderCars.empty() && myLeaderCars.top().time <= tMax) {
+        serial.clear();
+        for (std::vector<std::pair<int, LeaderEvent> >& p : parallel) {
+            p.clear();
+        }
+        int numParallel = 0;
+        while (!myLeaderCars.empty() && myLeaderCars.top().time <= tMax) {
+            const LeaderEvent e = myLeaderCars.top();
+            myLeaderCars.pop();
+            if (skipInvalidated(e)) {
+                continue;
+            }
+            MESegment* const on = e.veh->getSegment();
+            MESegment* const to = on == nullptr || e.veh->getQueIndex() == MESegment::PARKING_QUEUE ? nullptr : nextSegment(on, e.veh);
+            if (to != nullptr && isParallelSafe(e.veh, on, to)) {
+                // all moves onto an edge run on the thread of its rng (as the lanes in MSEdgeControl)
+                const MSEdge& edge = to->getEdge();
+                parallel[edge.getLanes()[0]->getRNGIndex() % numThreads].push_back(std::make_pair(edge.getNumericalID(), e));
+                numParallel++;
+            } else {
+                serial.push_back(e);
+            }
+        }
+        if (numParallel < MIN_PARALLEL_MOVES) {
+            // the small rounds within a step are not worth the threads (the limit does not depend on their number)
+            for (const std::vector<std::pair<int, LeaderEvent> >& p : parallel) {
+                for (const std::pair<int, LeaderEvent>& e : p) {
+                    serial.push_back(e.second);
+                }
+            }
+            std::sort(serial.begin(), serial.end(), [](const LeaderEvent& a, const LeaderEvent& b) {
+                return b < a;
+            });
+            numParallel = 0;
+        }
+        for (MESegment* const s : myChanged) {
+            s->commitOccupancy();
+        }
+        myChanged.clear();
+        // 1. the moves that only touch their target edge run on the workers, edge by edge in time order
+        for (int t = 0; t < numThreads && numParallel > 0; t++) {
+            std::sort(parallel[t].begin(), parallel[t].end(), [](const std::pair<int, LeaderEvent>& a, const std::pair<int, LeaderEvent>& b) {
+                return a.first != b.first ? a.first < b.first : b.second < a.second;
+            });
+            pool.add(new RoundTask(*this, parallel[t], ops[t]), t);
+        }
+        pool.waitAll();
+        // 2. apply what the workers recorded in an order that does not depend on the threads
+        std::vector<DeferredOps::Send> sends;
+        std::vector<DeferredOps::Leader> leaders;
+        for (DeferredOps& o : ops) {
+            sends.insert(sends.end(), o.sends.begin(), o.sends.end());
+            leaders.insert(leaders.end(), o.leaders.begin(), o.leaders.end());
+            for (const std::pair<MEVehicle*, SUMOTime>& inv : o.invalidated) {
+                LeaderEvent le(inv.first);
+                le.time = inv.second;
+                myInvalidatedLeaderCars.push(le);
+            }
+            myChanged.insert(myChanged.end(), o.changed.begin(), o.changed.end());
+            o.clear();
+        }
+        std::sort(sends.begin(), sends.end(), [](const DeferredOps::Send& a, const DeferredOps::Send& b) {
+            return a.time != b.time ? a.time < b.time : a.veh->getNumericalID() < b.veh->getNumericalID();
+        });
+        for (const DeferredOps::Send& s : sends) {
+            // the event times of the arrivals come first: a departure may promote an arrived vehicle to queue leader
+            s.veh->setEventTime(s.eventTime);
+            s.veh->setUnqueuedEventTime(s.eventTime);
+        }
+        for (const DeferredOps::Send& s : sends) {
+            s.from->completeSend(s.veh, s.qIdx, s.link, s.time, s.headway, s.queued);
+        }
+        for (DeferredOps::Leader& l : leaders) {
+            l.eventTime = MAX2(l.eventTime, l.veh->getEventTime());
+        }
+        std::sort(leaders.begin(), leaders.end(), [](const DeferredOps::Leader& a, const DeferredOps::Leader& b) {
+            return a.eventTime != b.eventTime ? a.eventTime < b.eventTime : a.veh->getNumericalID() < b.veh->getNumericalID();
+        });
+        for (const DeferredOps::Leader& l : leaders) {
+            l.veh->setEventTime(l.eventTime);
+            myLeaderCars.push(LeaderEvent(l.veh));
+            l.veh->setApproaching(l.link);
+        }
+        // 3. the remaining events run here in time order
+        for (const LeaderEvent& e : serial) {
+            if (!skipInvalidated(e)) {
+                checkCar(e.veh);
+            }
+        }
+    }
+#else
+    UNUSED_PARAMETER(tMax);
+#endif
+}
 
 /****************************************************************************/

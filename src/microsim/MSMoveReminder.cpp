@@ -22,6 +22,8 @@
 #include <config.h>
 
 #include <string>
+#include <utils/common/ScopedLocker.h>
+#include "MSGlobals.h"
 #include "MSLane.h"
 #include "MSMoveReminder.h"
 
@@ -74,6 +76,10 @@ MSMoveReminder::updateDetector(SUMOTrafficObject& veh, double entryPos, double l
     // each vehicle is tracked linearly across its segment. For each vehicle,
     // the time and position of the previous call are maintained and only
     // the increments are sent to notifyMoveInternal
+#ifdef HAVE_FOX
+    // the parallel mesoscopic loop updates the reminders of a segment from several threads
+    ScopedLocker<> lock(myNotificationMutex, MSGlobals::gNumSimThreads > 1);
+#endif
     if (entryTime > currentTime) {
         return; // calibrator may insert vehicles a tiny bit into the future; ignore those
     }

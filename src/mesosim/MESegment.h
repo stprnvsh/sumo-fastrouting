@@ -322,6 +322,14 @@ public:
      */
     MEVehicle* removeCar(MEVehicle* v, SUMOTime leaveTime, const MSMoveReminder::Notification reason);
 
+    /** @brief Removes the given car from its queue without notifying its reminders (removeCar does both)
+     *
+     * @param[in] v The vehicle to remove
+     * @param[in] qIdx The queue the vehicle is in (the vehicle itself may already point to its next segment)
+     * @return The next first vehicle to add to the net's que
+     */
+    MEVehicle* unlinkCar(MEVehicle* v, const int qIdx);
+
     /** @brief Returns the link the given car will use when passing the next junction
      *
      * This returns non-zero values only for the last segment and only
@@ -351,14 +359,40 @@ public:
      */
     virtual void send(MEVehicle* veh, MESegment* const next, const int nextQIdx, SUMOTime time, const MSMoveReminder::Notification reason);
 
+    /** @brief The first half of send for a departure that the parallel loop completes later (see completeSend)
+     *
+     * Notifies the vehicle's reminders and computes the headway while the vehicle is still on this segment.
+     * Only valid for MELSegment, whose headway does not depend on the queue state.
+     * @param[in] veh The vehicle in question
+     * @param[in] next The subsequent segment for delay calculation
+     * @param[in] time the leave time
+     * @return the headway to pass to completeSend
+     */
+    SUMOTime prepareSend(MEVehicle* veh, MESegment* const next, const int nextQIdx, SUMOTime time, const MSMoveReminder::Notification reason);
+
+    /** @brief The second half of send for a departure prepared by prepareSend, run on the main thread
+     *
+     * Removes the vehicle from its queue, sets the block time and promotes the follower.
+     * @param[in] veh The vehicle which left
+     * @param[in] qIdx The queue it left
+     * @param[in] link The link it was registered on (nullptr if none)
+     * @param[in] time the leave time
+     * @param[in] headway The headway computed by prepareSend
+     * @param[in] queued Whether the vehicle had lost time in the queue (MELSegment: the speed of the gap it leaves)
+     */
+    virtual void completeSend(MEVehicle* veh, const int qIdx, MSLink* link, SUMOTime time, SUMOTime headway, bool queued);
+
     /** @brief Adds the vehicle to the segment, adapting its parameters
      *
      * @param[in] veh The vehicle in question
      * @param[in] time the leave time
      * @param[in] isDepart whether the vehicle just departed
+     * @param[out] deferredEventTime if given, the new event time of the vehicle is stored here instead of being set
+     *  (the parallel loop applies it on the main thread)
      * @todo Isn't always time == veh->getEventTime?
      */
-    void receive(MEVehicle* veh, const int qIdx, SUMOTime time, const bool isDepart = false, const bool isTeleport = false, const bool newEdge = false);
+    void receive(MEVehicle* veh, const int qIdx, SUMOTime time, const bool isDepart = false, const bool isTeleport = false, const bool newEdge = false,
+                 SUMOTime* const deferredEventTime = nullptr);
 
 
     /** @brief tries to remove any car from this segment
@@ -386,6 +420,16 @@ public:
      * @return The time the vehicle thinks it leaves
      */
     SUMOTime getEventTime() const;
+
+    /// @brief whether a reminder of this segment must be updated on the main thread of the parallel loop
+    inline bool hasSerialReminders() const {
+        return myHasSerialReminders;
+    }
+
+    /// @brief stores the current occupancy for the reads of the parallel loop (see MELoop::simulateParallel)
+    inline void commitOccupancy() {
+        myCommittedOccupancy = getBruttoOccupancy();
+    }
 
     /// @brief Like getEventTime but returns seconds (for visualization)
     inline double getEventTimeSeconds() const {
@@ -603,6 +647,12 @@ protected:
 
     /// @brief the last headway
     SUMOTime myLastHeadway;
+
+    /// @brief whether a reminder other than mean data was added (see hasSerialReminders)
+    bool myHasSerialReminders = false;
+
+    /// @brief the occupancy at the last commit of the parallel loop
+    double myCommittedOccupancy = 0.;
 
     /* @brief segment for signifying vaporization. This segment has invalid
      * data and should only be used as a unique pointer */

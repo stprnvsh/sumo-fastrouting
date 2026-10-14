@@ -59,12 +59,21 @@ public:
      */
     void simulate(SUMOTime tMax);
 
+    /// @brief whether the calling thread runs moves of the parallel loop (see simulateParallel)
+    static bool inParallelPhase() {
+        return myDeferred != nullptr;
+    }
+
+    /// @brief notes that the occupancy of the segment changed (the parallel loop keeps committed copies for junction control)
+    void segmentChanged(MESegment* s);
+
     /** @brief Adds the given car to the leading vehicles
      *
      * @param[in] veh the car which became a leading one
      * @param[in] link the link on which the car shall register its approach
+     * @param[in] blockTime the earliest event time of the car (-1: its current event time)
      */
-    void addLeaderCar(MEVehicle* veh, MSLink* link);
+    void addLeaderCar(MEVehicle* veh, MSLink* link, SUMOTime blockTime = -1);
 
     /** @brief Removes the given car from the leading vehicles
      *
@@ -135,6 +144,25 @@ private:
      */
     void teleportVehicle(MEVehicle* veh, MESegment* const toSegment, bool disconnected);
 
+    /** @brief Perform simulation up to the given time on several threads (option --threads with --meso-ltm)
+     *
+     * Runs rounds until no event is due: the moves that only touch their own vehicle and their target
+     * edge run on the worker threads (all moves onto an edge on the thread of its rng, as in MSEdgeControl),
+     * which record their side effects on shared state (departures from segments of other edges, event
+     * scheduling, link registrations) instead of applying them; the main thread then applies those in a
+     * canonical order and runs the remaining events (stops, arrivals, teleports, segments with reminders
+     * bound to one thread). Junction control ignores foes due before the checked vehicle (MSLink::blockedAtTime).
+     * Events of different edges may run out of time order within a round, so the results differ slightly
+     * from the serial loop but not between thread counts (the small rounds that run on the main thread
+     * are chosen by a fixed limit).
+     *
+     * @param[in] tMax the end time for the sim step
+     */
+    void simulateParallel(SUMOTime tMax);
+
+    /// @brief whether the move of the vehicle from its segment to the given one may run on a worker thread
+    bool isParallelSafe(const MEVehicle* veh, const MESegment* on, const MESegment* to) const;
+
 private:
 
     struct LeaderEvent {
@@ -163,6 +191,55 @@ private:
 
     /// @brief check whether the current car was invalidated and remove it from myInvalidatedLeaderCars
     bool wasInvalidated(const LeaderEvent& e);
+
+    /// @brief drops the invalidations older than the event and tells whether the event itself was invalidated
+    bool skipInvalidated(const LeaderEvent& e);
+
+    /// @brief what a worker thread of the parallel loop records instead of changing shared state
+    struct DeferredOps {
+        /// @brief a departure from a segment of another edge, completed on the main thread (MESegment::completeSend)
+        struct Send {
+            MESegment* from;
+            MEVehicle* veh;
+            int qIdx;
+            MSLink* link;
+            SUMOTime time;
+            SUMOTime headway;
+            SUMOTime eventTime;
+            bool queued;
+        };
+        std::vector<Send> sends;
+        /// @brief an event to schedule: the vehicle, the link it registers on and its earliest event time (-1: the current one)
+        struct Leader {
+            MEVehicle* veh;
+            MSLink* link;
+            SUMOTime eventTime;
+        };
+        std::vector<Leader> leaders;
+        /// @brief removeLeaderCar calls: the vehicle and the time of the event to invalidate
+        std::vector<std::pair<MEVehicle*, SUMOTime> > invalidated;
+        /// @brief segments whose occupancy changed
+        std::vector<MESegment*> changed;
+
+        void clear() {
+            sends.clear();
+            leaders.clear();
+            invalidated.clear();
+            changed.clear();
+        }
+    };
+
+    /// @brief runs the moves of one thread of a round
+    class RoundTask;
+
+    /// @brief the buffer of the worker thread while it runs moves of the parallel loop, nullptr otherwise
+    static thread_local DeferredOps* myDeferred;
+
+    /// @brief the number of moves below which a round runs on the main thread
+    static const int MIN_PARALLEL_MOVES;
+
+    /// @brief segments whose occupancy changed on the main thread since the last commit of the parallel loop
+    std::vector<MESegment*> myChanged;
 
 
     /// @brief leader cars in the segments sorted by exit time

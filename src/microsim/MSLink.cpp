@@ -1057,6 +1057,9 @@ MSLink::blockedAtTime(SUMOTime arrivalTime, SUMOTime leaveTime, double arrivalSp
         }
 #endif
         if (it.first != ego
+                // the parallel mesoscopic loop checks the vehicles of a step out of their time order:
+                // a foe due before ego has already left or been rescheduled when ego arrives
+                && (!MSGlobals::gMesoParallelLoop || it.second.arrivalTime >= arrivalTime)
                 && (ego == nullptr
                     || ego->getVehicleType().getParameter().getJMParam(SUMO_ATTR_JM_IGNORE_FOE_PROB, 0) == 0
                     || ego->getVehicleType().getParameter().getJMParam(SUMO_ATTR_JM_IGNORE_FOE_SPEED, 0) < it.second.speed

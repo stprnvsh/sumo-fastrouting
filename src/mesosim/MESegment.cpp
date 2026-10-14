@@ -34,6 +34,7 @@
 #include <microsim/traffic_lights/MSRailSignalControl.h>
 #include <microsim/output/MSXMLRawOut.h>
 #include <microsim/output/MSDetectorFileOutput.h>
+#include <microsim/output/MSMeanData.h>
 #include <microsim/MSVehicleControl.h>
 #include <microsim/devices/MSDevice.h>
 #include <utils/common/FileHelpers.h>
@@ -271,6 +272,11 @@ MESegment::jamThresholdForSpeed(double speed, double jamThresh) const {
 
 void
 MESegment::addDetector(MSMoveReminder* data, int queueIndex) {
+    // mean data updates are serialised by the reminder's own mutex; everything else (rerouters,
+    // calibrators, drive ways) keeps the moves on this segment on the main thread of the parallel loop
+    if (dynamic_cast<MSMeanData::MeanDataValues*>(data) == nullptr) {
+        myHasSerialReminders = true;
+    }
     if (queueIndex == -1) {
         for (Queue& q : myQueues) {
             q.addDetector(data);
@@ -455,14 +461,20 @@ MESegment::writeVehicles(OutputDevice& of) const {
 
 MEVehicle*
 MESegment::removeCar(MEVehicle* v, SUMOTime leaveTime, const MSMoveReminder::Notification reason) {
-    Queue& q = myQueues[v->getQueIndex()];
     // One could be tempted to do  v->setSegment(next); here but position on lane will be invalid if next == 0
     v->updateDetectors(leaveTime, v->getEventTime(), true, reason);
+    return unlinkCar(v, v->getQueIndex());
+}
+
+
+MEVehicle*
+MESegment::unlinkCar(MEVehicle* v, const int qIdx) {
     myNumVehicles--;
     myEdge.lock();
-    MEVehicle* nextLeader = q.remove(v);
+    MEVehicle* nextLeader = myQueues[qIdx].remove(v);
     myEdge.invalidateMesoCache();
     myEdge.unlock();
+    MSGlobals::gMesoNet->segmentChanged(this);
     return nextLeader;
 }
 
@@ -564,7 +576,9 @@ MESegment::limitedControlOverride(const MSLink* link) const {
     // if the target segment of this link is not saturated junction control is disabled
     const MSEdge& targetEdge = link->getLane()->getEdge();
     const MESegment* target = MSGlobals::gMesoNet->getSegmentForEdge(targetEdge);
-    return (target->getBruttoOccupancy() * 2 < target->myJamThreshold) && !targetEdge.isRoundabout();
+    // a worker thread of the parallel loop reads the value committed before the current round
+    const double occupancy = MELoop::inParallelPhase() ? target->myCommittedOccupancy : target->getBruttoOccupancy();
+    return (occupancy * 2 < target->myJamThreshold) && !targetEdge.isRoundabout();
 }
 
 
@@ -608,8 +622,33 @@ MESegment::send(MEVehicle* veh, MESegment* const next, const int nextQIdx, SUMOT
         q.setBlockTime(time + myLastHeadway);
     }
     if (lc != nullptr) {
-        lc->setEventTime(MAX2(lc->getEventTime(), q.getBlockTime()));
-        MSGlobals::gMesoNet->addLeaderCar(lc, getLink(lc));
+        MSGlobals::gMesoNet->addLeaderCar(lc, getLink(lc), q.getBlockTime());
+    }
+}
+
+
+SUMOTime
+MESegment::prepareSend(MEVehicle* veh, MESegment* const next, const int nextQIdx, SUMOTime time, const MSMoveReminder::Notification reason) {
+    assert(!veh->isStopped());
+    veh->updateDetectors(time, veh->getEventTime(), true, reason);
+    return computeHeadway(myQueues[veh->getQueIndex()], next->myQueues[nextQIdx], next, veh);
+}
+
+
+void
+MESegment::completeSend(MEVehicle* veh, const int qIdx, MSLink* link, SUMOTime time, SUMOTime headway, bool /*queued*/) {
+    Queue& q = myQueues[qIdx];
+    if (link != nullptr) {
+        link->removeApproaching(veh);
+    }
+    MEVehicle* const lc = unlinkCar(veh, qIdx);
+    if (myEdge.isNormal() && myCapacity >= 22.5) {
+        veh->markJammed(q.getOccupancy() > myJamThreshold);
+    }
+    myLastHeadway = headway;
+    q.setBlockTime(time + headway);
+    if (lc != nullptr) {
+        MSGlobals::gMesoNet->addLeaderCar(lc, getLink(lc), q.getBlockTime());
     }
 }
 
@@ -645,7 +684,12 @@ MESegment::getTauJJ(double nextQueueSize, double nextQueueCapacity, double nextJ
 
 bool
 MESegment::overtake() {
-    return myOvertaking && RandHelper::rand() > (getBruttoOccupancy() / myCapacity);
+    if (!myOvertaking) {
+        return false;
+    }
+    // the parallel loop moves all vehicles onto an edge on the thread of its rng (see MELoop::simulateParallel)
+    const double r = MSGlobals::gMesoParallelLoop ? RandHelper::rand(myEdge.getLanes()[0]->getRNG()) : RandHelper::rand();
+    return r > getBruttoOccupancy() / myCapacity;
 }
 
 
@@ -658,7 +702,8 @@ MESegment::addReminders(MEVehicle* veh) const {
 
 
 void
-MESegment::receive(MEVehicle* veh, const int qIdx, SUMOTime time, const bool isDepart, const bool isTeleport, const bool newEdge) {
+MESegment::receive(MEVehicle* veh, const int qIdx, SUMOTime time, const bool isDepart, const bool isTeleport, const bool newEdge,
+                   SUMOTime* const deferredEventTime) {
     const double speed = isDepart ? -1 : MAX2(veh->getSpeed(), MESO_MIN_SPEED); // on the previous segment
     veh->setSegment(this); // for arrival checking
     veh->setLastEntryTime(time);
@@ -721,8 +766,14 @@ MESegment::receive(MEVehicle* veh, const int qIdx, SUMOTime time, const bool isD
             q.setEntryBlockTime(time + tauWithVehLength(myTau_ff, veh->getVehicleType().getLengthWithGap(), veh->getVehicleType().getCarFollowModel().getHeadwayTime()) - 1);
         }
         q.setOccupancy(MIN2(myQueueCapacity, q.getOccupancy() + veh->getVehicleType().getLengthWithGap()));
-        veh->setEventTime(tleave);
-        veh->setUnqueuedEventTime(tleave);
+        MSGlobals::gMesoNet->segmentChanged(this);
+        if (deferredEventTime != nullptr) {
+            // the parallel loop applies it on the main thread; until then other threads read the old event time
+            *deferredEventTime = tleave;
+        } else {
+            veh->setEventTime(tleave);
+            veh->setUnqueuedEventTime(tleave);
+        }
         veh->setSegment(this, qIdx);
     }
     addReminders(veh);

@@ -32,3 +32,6 @@ lane_queue
 # ignoring lanes by vclass
 ignore_lanes
 bugs
+
+# the LTM model on two threads (the result does not depend on the thread count)
+ltm_threads
