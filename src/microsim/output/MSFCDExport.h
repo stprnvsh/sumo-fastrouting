@@ -20,12 +20,16 @@
 #pragma once
 #include <config.h>
 
+#include <string>
+#include <vector>
 #include <utils/common/SUMOTime.h>
+#include <utils/geom/Position.h>
 
 
 // ===========================================================================
 // class declarations
 // ===========================================================================
+class GeoConvHelper;
 class OutputDevice;
 class MSEdgeControl;
 class MSEdge;
@@ -56,6 +60,29 @@ public:
      * @exception IOError If an error on writing occurs (!!! not yet implemented)
      */
     static void write(OutputDevice& of, const SUMOTime timestep, const SumoXMLTag tag = SUMO_TAG_NOTHING);
+
+    /// @brief releases the worker threads (called when the network is unloaded)
+    static void cleanup();
+
+    /// @brief the values of a vehicle which are precomputed in parallel before writing (see fcd-output.threads)
+    struct VehicleState {
+        const SUMOVehicle* veh = nullptr;
+        Position pos;
+        double angle = 0.;
+        double slope = 0.;
+        double posOnLane = 0.;
+    };
+
+    /** @brief write a single vehicle, either using the precomputed values or computing them on the fly
+     *
+     * Also runs on worker threads (against staging devices) when the output
+     * format supports parallel row serialization, see fcd-output.threads.
+     * @param[in] geo the geo projection to use (a thread private copy on worker threads)
+     */
+    static void writeVehicle(OutputDevice& of, const SUMOVehicle* const veh, const VehicleState* const precomputed,
+                             const SumoXMLAttrMask& mask, const bool useGeo, const bool useUTM,
+                             const double maxLeaderDistance, const std::vector<std::string>& params,
+                             const GeoConvHelper* const geo);
 
 private:
     /// @brief write transportable

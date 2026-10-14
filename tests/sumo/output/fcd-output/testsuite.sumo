@@ -4,6 +4,9 @@ persons
 # output fcd data in cartesian coordinates
 cartesian
 
+# the same output, values computed and rows serialized on two threads
+cartesian_threads
+
 # output fcd data in geo-coordinates
 geo
 

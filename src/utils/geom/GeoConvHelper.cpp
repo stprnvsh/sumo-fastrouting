@@ -103,9 +103,9 @@ GeoConvHelper::GeoConvHelper(const std::string& proj, const Position& offset,
 
 #ifdef PROJ_API_FILE
 void
-GeoConvHelper::initProj(const std::string& proj) {
 #ifdef PROJ_VERSION_MAJOR
-    myProjection = proj_create(PJ_DEFAULT_CTX, proj.c_str());
+GeoConvHelper::initProj(const std::string& proj, PJ_CONTEXT* pjContext) {
+    myProjection = proj_create(pjContext, proj.c_str());
     checkError(myProjection);
 #if PROJ_VERSION_MAJOR > 5
     if (myProjection != nullptr) {
@@ -134,10 +134,40 @@ GeoConvHelper::initProj(const std::string& proj) {
     }
 #endif
 #else
+GeoConvHelper::initProj(const std::string& proj) {
     myProjection = pj_init_plus(proj.c_str());
 #endif
 }
 #endif
+
+
+GeoConvHelper*
+GeoConvHelper::makeThreadSafeCopy() const {
+    GeoConvHelper* copy = new GeoConvHelper("!", myOffset, myOrigBoundary, myConvBoundary,
+                                            myGeoScale, 0., myUseInverseProjection, myFlatten);
+    copy->myProjString = myProjString;
+    copy->myProjectionMethod = myProjectionMethod;
+    copy->mySin = mySin;
+    copy->myCos = myCos;
+#ifdef PROJ_API_FILE
+    copy->myRadians = myRadians;
+    if (myProjection != nullptr) {
+        if (myProjectionMethod != PROJ) {
+            // a lazily initialized abstract projection (UTM / DHDN) cannot be rebuilt from the projection string
+            delete copy;
+            return nullptr;
+        }
+#ifdef PROJ_VERSION_MAJOR
+        copy->initProj(myProjString, proj_context_create());
+#endif
+        if (copy->myProjection == nullptr) {
+            delete copy;
+            return nullptr;
+        }
+    }
+#endif
+    return copy;
+}
 
 
 GeoConvHelper::~GeoConvHelper() {

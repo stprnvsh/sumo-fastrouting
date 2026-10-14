@@ -32,6 +32,7 @@
 #include <microsim/MSLane.h>
 #include <microsim/MSEdge.h>
 #include <microsim/MSVehicle.h>
+#include <microsim/output/MSFCDExport.h>
 #include "MSDevice_FCD.h"
 
 
@@ -52,6 +53,7 @@ bool MSDevice_FCD::myShapeFilterInitialized(false);
 bool MSDevice_FCD::myShapeFilterDesired(false);
 SumoXMLAttrMask MSDevice_FCD::myWrittenAttributes;
 bool MSDevice_FCD::mySkipEmpty(false);
+int MSDevice_FCD::myThreads(1);
 
 
 // ===========================================================================
@@ -175,6 +177,7 @@ MSDevice_FCD::initOnce() {
     myParamsToWrite = oc.getStringVector("fcd-output.params");
     myRadius = oc.getFloat("device.fcd.radius");
     mySkipEmpty = oc.getBool("fcd-output.skip-empty");
+    myThreads = oc.getInt("fcd-output.threads");
     if (oc.isSet("fcd-output.filter-edges.input-file")) {
         const std::string file = oc.getString("fcd-output.filter-edges.input-file");
         std::ifstream strm(file.c_str());
@@ -264,6 +267,8 @@ MSDevice_FCD::cleanup() {
     myShapeFilterInitialized = false;
     myShapeFilterDesired = false;
     myWrittenAttributes.reset();
+    myThreads = 1;
+    MSFCDExport::cleanup();
 }
 
 

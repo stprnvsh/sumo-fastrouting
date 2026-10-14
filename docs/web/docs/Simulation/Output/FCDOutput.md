@@ -215,6 +215,7 @@ The value **all** enables all attributes (including emission output). There are 
 - **--fcd-output.acceleration** will add acceleration data to the output (also lateral acceleration when using the [sublane model](../SublaneModel.md))
 - **--fcd-output.max-leader-distance FLOAT** will add attributes leaderGap, leaderSpeed, leaderID whenever a vehicle has a leader within the given distance. Otherwise, leaderID will be "" and leaderGap, leaderSpeed will be -1.
 - **--fcd-output.params KEY1,KEY2,...** adds [generic parameters](../GenericParameters.md) to the output (supports device and car-following model parameters as well as arbitrary user-define values)
+- **--fcd-output.threads INT** computes the vehicle values on the given number of threads and, for XML output, also serializes the rows there; the output is identical to the single-threaded output
 
 ## NOTES
 

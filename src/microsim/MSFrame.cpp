@@ -184,6 +184,8 @@ MSFrame::fillOptions() {
     oc.addDescription("fcd-output.params", "Output", TL("Add generic parameter values to the FCD output"));
     oc.doRegister("fcd-output.filter-edges.input-file", new Option_FileName());
     oc.addDescription("fcd-output.filter-edges.input-file", "Output", TL("Restrict fcd output to the edge selection from the given input file"));
+    oc.doRegister("fcd-output.threads", new Option_Integer(1));
+    oc.addDescription("fcd-output.threads", "Output", TL("Defines the number of threads for computing the fcd output values"));
     oc.doRegister("fcd-output.attributes", new Option_StringVector());
     oc.addDescription("fcd-output.attributes", "Output", TL("List attributes that should be included in the FCD output"));
     oc.doRegister("fcd-output.filter-shapes", new Option_StringVector());
