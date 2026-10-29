@@ -259,6 +259,13 @@ private:
         void defer();
         /// @brief replaces the route of the vehicle by the one computed from the copied state (see defer)
         void apply();
+        /// @brief lets waitForAll run the task on the main thread (see reroute)
+        void runOnMain() {
+            myOnMain = true;
+        }
+        bool isOnMain() const {
+            return myOnMain;
+        }
     private:
         SUMOVehicle& myVehicle;
         const SUMOTime myTime;
@@ -267,6 +274,7 @@ private:
         const bool mySilent;
         const Prohibitions myProhibited;
         MSBaseVehicle::DeferredReroute* myDeferred;
+        bool myOnMain = false;
     private:
         /// @brief Invalidated assignment operator.
         RoutingTask& operator=(const RoutingTask&) = delete;

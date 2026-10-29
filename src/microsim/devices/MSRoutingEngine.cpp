@@ -695,11 +695,16 @@ MSRoutingEngine::reroute(SUMOVehicle& vehicle, const SUMOTime currentTime, const
 #ifdef HAVE_FOX
     if (myThreadPool != nullptr) {
         RoutingTask* const task = new RoutingTask(vehicle, currentTime, info, onInit, silent, prohibited);
-        if (!onInit && MSGlobals::gUseMesoSim && !vehicle.hasStops()) {
+        myPendingTasks.push_back(task);
+        if (!onInit && MSGlobals::gUseMesoSim && vehicle.hasStops()) {
+            // replaceRoute changes the approach information of links, which the mesoscopic loop changes meanwhile
+            task->runOnMain();
+            return;
+        }
+        if (!onInit && MSGlobals::gUseMesoSim) {
             // the route is computed while the vehicle moves on and applied in waitForAll
             task->defer();
         }
-        myPendingTasks.push_back(task);
         myThreadPool->add(task);
         return;
     }
@@ -960,7 +965,12 @@ MSRoutingEngine::waitForAll() {
     if (myThreadPool != nullptr) {
         myThreadPool->waitAll(false);
         for (RoutingTask* const task : myPendingTasks) {
-            task->apply();
+            if (task->isOnMain()) {
+                // the workers wait, so their first router is free
+                task->run(myThreadPool->getWorkers().front());
+            } else {
+                task->apply();
+            }
             delete task;
         }
         myPendingTasks.clear();
