@@ -673,7 +673,7 @@ MSRoutingEngine::initRouter(SUMOVehicle* vehicle) {
             }
         }
     }
-    if (myThreadPool != nullptr && myCCHLive != nullptr && myCustomizePool == nullptr) {
+    if (myThreadPool != nullptr && myCCHLive != nullptr && myCustomizePool == nullptr && MSGlobals::gNumMesoThreads > 0) {
         // the sparse re-customization of the CCH metrics runs on its own thread while the vehicles move
         // and is published at the next barrier (see adaptEdgeEfforts)
         myCustomizePool = new MFXWorkerThread::Pool(1);
@@ -696,12 +696,12 @@ MSRoutingEngine::reroute(SUMOVehicle& vehicle, const SUMOTime currentTime, const
     if (myThreadPool != nullptr) {
         RoutingTask* const task = new RoutingTask(vehicle, currentTime, info, onInit, silent, prohibited);
         myPendingTasks.push_back(task);
-        if (!onInit && MSGlobals::gUseMesoSim && vehicle.hasStops()) {
+        if (!onInit && MSGlobals::gUseMesoSim && MSGlobals::gNumMesoThreads > 0 && vehicle.hasStops()) {
             // replaceRoute changes the approach information of links, which the mesoscopic loop changes meanwhile
             task->runOnMain();
             return;
         }
-        if (!onInit && MSGlobals::gUseMesoSim) {
+        if (!onInit && MSGlobals::gUseMesoSim && MSGlobals::gNumMesoThreads > 0) {
             // the route is computed while the vehicle moves on and applied in waitForAll
             task->defer();
         }

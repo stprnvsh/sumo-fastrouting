@@ -141,7 +141,7 @@ MSInsertionControl::emitVehicles(SUMOTime time) {
 
     // go through the list of previously refused vehicles, first
     MSNet::getInstance()->lockPendingEmits();
-    if (MSGlobals::gUseMesoSim) {
+    if (MSGlobals::gUseMesoSim && MSGlobals::gNumMesoThreads > 0) {
         // the vehicles are inserted from the front of the queue of their edge; a refused one blocks the queue (option eager-insert)
         for (auto item = myPendingEmitsByEdge.begin(); item != myPendingEmitsByEdge.end();) {
             MSVehicleContainer::VehicleVector& queue = item->second;
@@ -241,14 +241,14 @@ MSInsertionControl::checkCandidates(SUMOTime time, const bool preCheck) {
     while (myAllVeh.anyWaitingBefore(time)) {
         const MSVehicleContainer::VehicleVector& top = myAllVeh.top();
         copy(top.begin(), top.end(), back_inserter(myPendingEmits));
-        if (MSGlobals::gUseMesoSim) {
+        if (MSGlobals::gUseMesoSim && MSGlobals::gNumMesoThreads > 0) {
             for (SUMOVehicle* const veh : top) {
                 myPendingEmitsByEdge[veh->getEdge()].push_back(veh);
             }
         }
         myAllVeh.pop();
     }
-    if (preCheck && MSGlobals::gUseMesoSim) {
+    if (preCheck && MSGlobals::gUseMesoSim && MSGlobals::gNumMesoThreads > 0) {
         // the vehicles wait in the queue of their edge: after a refusal the rest of the queue is not checked (option eager-insert)
         for (auto& item : myPendingEmitsByEdge) {
             for (auto it = item.second.begin(); it != item.second.end();) {
@@ -293,7 +293,7 @@ MSInsertionControl::checkCandidates(SUMOTime time, const bool preCheck) {
 
 void
 MSInsertionControl::dropPendingEmit(const SUMOVehicle* veh) {
-    if (MSGlobals::gUseMesoSim) {
+    if (MSGlobals::gUseMesoSim && MSGlobals::gNumMesoThreads > 0) {
         MSVehicleContainer::VehicleVector& queue = myPendingEmitsByEdge[veh->getEdge()];
         const auto it = std::find(queue.begin(), queue.end(), veh);
         if (it != queue.end()) {

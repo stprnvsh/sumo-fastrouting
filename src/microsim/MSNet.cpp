@@ -886,7 +886,8 @@ MSNet::simulationStep(const bool onlyMove) {
         MSRailSignalControl::getInstance().updateSignals(myStep);
     }
 #ifdef HAVE_FOX
-    if (!MSGlobals::gUseMesoSim) {
+    // the parallel mesoscopic loop applies the routes after the loop (MSRoutingEngine::RoutingTask::defer)
+    if (!MSGlobals::gUseMesoSim || MSGlobals::gNumMesoThreads == 0) {
         MSRoutingEngine::waitForAll();
     }
 #endif

@@ -887,7 +887,7 @@ MSEdge::insertVehicle(SUMOVehicle& v, SUMOTime time, const bool checkOnly, const
                 result = segment->initialise(veh, time);
             }
         }
-        if (checkOnly && !result) {
+        if (checkOnly && !result && MSGlobals::gNumMesoThreads > 0) {
             myLastFailedInsertionCheckTime = time;
         }
         return result;
