@@ -746,7 +746,7 @@ MESegment::receive(MEVehicle* veh, const int qIdx, SUMOTime time, const bool isD
                     // the overtaken car is no longer the leader and must not block foes
                     MSLink* const link = getLink(cars[0]);
                     if (link != nullptr) {
-                        link->removeApproaching(cars[0]);
+                        MSGlobals::gMesoNet->removeApproaching(cars[0], link);
                     }
                     MSGlobals::gMesoNet->removeLeaderCar(cars[0]);
                     newLeader = veh;
