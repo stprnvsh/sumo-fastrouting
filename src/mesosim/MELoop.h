@@ -84,6 +84,13 @@ public:
      */
     long long int getEventIndex(const MEVehicle* veh) const;
 
+    /** @brief Removes the approach of the given car from the given link
+     *
+     * While the threads move the deferred cars, other threads read the approaching vehicles
+     *  of the link (MSLink::opened), so the main thread removes it after the moves.
+     */
+    void removeApproaching(MEVehicle* veh, MSLink* link);
+
     /** @brief remove the given car and clean up the relevant data structures */
     void vaporizeCar(MEVehicle* v, MSMoveReminder::Notification reason);
 
@@ -241,10 +248,13 @@ private:
         std::vector<DeferredLeader> leaders;
         /// @brief cars refused because the leader of their target is deferred as well: the main thread moves them after the departures
         std::vector<MEVehicle*> serial;
+        /// @brief cars overtaken by an arrival which no longer approach their link: the main thread removes them after the moves
+        std::vector<std::pair<MEVehicle*, MSLink*> > unapproached;
         void clear() {
             moves.clear();
             leaders.clear();
             serial.clear();
+            unapproached.clear();
         }
     };
 
